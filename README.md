@@ -27,7 +27,9 @@ Flags:
 - `--api-hash string`   Telegram API Hash
 - `--api-id int`        Telegram API ID
 - `--api-key string`    TGScan API key
+- `--csv`               Export results to CSV file
 - `-h, --help`          Help for search command
+- `--json`              Export results to JSON file
 - `--no-prompt`         Disable interactive prompts
 
 ### Completion Command
