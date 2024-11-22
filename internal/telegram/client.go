@@ -2,7 +2,10 @@ package telegram
 
 import (
 	"context"
+	"encoding/csv"
+	"encoding/json"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/gnomegl/teleslurp/internal/config"
@@ -13,7 +16,75 @@ import (
 	"github.com/gotd/td/tg"
 )
 
-func RunClient(ctx context.Context, cfg *config.Config, searchUser *types.User, groups []types.Group) error {
+type MessageData struct {
+	ChannelTitle string    `json:"channel_title"`
+	ChannelUsername string `json:"channel_username"`
+	MessageID    int      `json:"message_id"`
+	Date         string   `json:"date"`
+	Message      string   `json:"message"`
+	URL          string   `json:"url"`
+}
+
+func exportMessagesToJSON(messages []MessageData, username string) error {
+	filename := fmt.Sprintf("%s_messages.json", username)
+	file, err := os.Create(filename)
+	if err != nil {
+		return fmt.Errorf("error creating JSON file: %w", err)
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(messages); err != nil {
+		return fmt.Errorf("error encoding JSON: %w", err)
+	}
+
+	fmt.Printf("Messages exported to JSON file: %s\n", filename)
+	return nil
+}
+
+func exportMessagesToCSV(messages []MessageData, username string) error {
+	filename := fmt.Sprintf("%s_messages.csv", username)
+	file, err := os.Create(filename)
+	if err != nil {
+		return fmt.Errorf("error creating CSV file: %w", err)
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+
+	headers := []string{"Channel Title", "Channel Username", "Message ID", "Date", "Message", "URL"}
+	if err := writer.Write(headers); err != nil {
+		return fmt.Errorf("error writing CSV headers: %w", err)
+	}
+
+	for _, msg := range messages {
+		record := []string{
+			msg.ChannelTitle,
+			msg.ChannelUsername,
+			fmt.Sprintf("%d", msg.MessageID),
+			msg.Date,
+			msg.Message,
+			msg.URL,
+		}
+		if err := writer.Write(record); err != nil {
+			return fmt.Errorf("error writing CSV record: %w", err)
+		}
+	}
+
+	fmt.Printf("Messages exported to CSV file: %s\n", filename)
+	return nil
+}
+
+type OutputFormat string
+
+const (
+    FormatJSON OutputFormat = "json"
+    FormatCSV  OutputFormat = "csv"
+)
+
+func RunClient(ctx context.Context, cfg *config.Config, searchUser *types.User, groups []types.Group, format OutputFormat) error {
 	sessionStore := &session.FileStorage{Path: config.GetSessionPath()}
 
 	client := telegram.NewClient(cfg.TGAPIID, cfg.TGAPIHash, telegram.Options{
@@ -84,6 +155,7 @@ func RunClient(ctx context.Context, cfg *config.Config, searchUser *types.User, 
 		fmt.Printf("Found user %s with ID: %d and AccessHash: %d\n",
 			targetUser.Username, targetUser.ID, targetUser.AccessHash)
 
+		var allMessages []MessageData
 		for _, group := range groups {
 			resolvedPeer, err := api.ContactsResolveUsername(ctx, group.Username)
 			if err != nil {
@@ -139,11 +211,21 @@ func RunClient(ctx context.Context, cfg *config.Config, searchUser *types.User, 
 					if m, ok := msg.(*tg.Message); ok {
 						matchCount++
 						messageURL := fmt.Sprintf("https://t.me/%s/%d", group.Username, m.ID)
+						messageData := MessageData{
+							ChannelTitle: group.Title,
+							ChannelUsername: group.Username,
+							MessageID: m.ID,
+							Date: time.Unix(int64(m.Date), 0).Format("2006-01-02 15:04:05"),
+							Message: m.Message,
+							URL: messageURL,
+						}
+						allMessages = append(allMessages, messageData)
+
 						fmt.Printf("\nMessage #%d:\n", matchCount)
-						fmt.Printf("Channel: %s\n", group.Title)
-						fmt.Printf("Date: %s\n", time.Unix(int64(m.Date), 0).Format("2006-01-02 15:04:05"))
-						fmt.Printf("Message: %s\n", m.Message)
-						fmt.Printf("Link: %s\n", messageURL)
+						fmt.Printf("Channel: %s\n", messageData.ChannelTitle)
+						fmt.Printf("Date: %s\n", messageData.Date)
+						fmt.Printf("Message: %s\n", messageData.Message)
+						fmt.Printf("Link: %s\n", messageData.URL)
 					}
 				}
 
@@ -164,6 +246,22 @@ func RunClient(ctx context.Context, cfg *config.Config, searchUser *types.User, 
 
 			time.Sleep(2 * time.Second)
 		}
+
+		if len(allMessages) > 0 {
+			switch format {
+			case FormatJSON:
+				if err := exportMessagesToJSON(allMessages, searchUser.Username); err != nil {
+					fmt.Printf("Warning: Failed to export messages to JSON: %v\n", err)
+				}
+			case FormatCSV:
+				if err := exportMessagesToCSV(allMessages, searchUser.Username); err != nil {
+					fmt.Printf("Warning: Failed to export messages to CSV: %v\n", err)
+				}
+			default:
+				return fmt.Errorf("unsupported output format: %s", format)
+			}
+		}
+
 		return nil
 	})
 }

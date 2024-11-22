@@ -2,7 +2,10 @@ package commands
 
 import (
 	"context"
+	"encoding/csv"
+	"encoding/json"
 	"fmt"
+	"os"
 
 	"github.com/gnomegl/teleslurp/internal/config"
 	"github.com/gnomegl/teleslurp/internal/telegram"
@@ -16,6 +19,8 @@ var (
 	apiID     int
 	apiHash   string
 	noPrompt  bool
+	exportJSON bool
+	exportCSV  bool
 )
 
 func init() {
@@ -35,6 +40,8 @@ func init() {
 	searchCmd.Flags().IntVar(&apiID, "api-id", 0, "Telegram API ID")
 	searchCmd.Flags().StringVar(&apiHash, "api-hash", "", "Telegram API Hash")
 	searchCmd.Flags().BoolVar(&noPrompt, "no-prompt", false, "Disable interactive prompts")
+	searchCmd.Flags().BoolVar(&exportJSON, "json", false, "Export results to JSON file")
+	searchCmd.Flags().BoolVar(&exportCSV, "csv", false, "Export results to CSV file")
 
 	rootCmd.AddCommand(searchCmd)
 }
@@ -69,7 +76,6 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		cfg = &config.Config{}
 	}
 
-	// Override config with command line flags if provided
 	if apiKey != "" {
 		cfg.APIKey = apiKey
 	}
@@ -80,7 +86,6 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		cfg.TGAPIHash = apiHash
 	}
 
-	// Prompt for missing credentials if needed and not disabled
 	if !noPrompt {
 		if cfg.APIKey == "" {
 			cfg.APIKey = promptAPIKey()
@@ -91,7 +96,6 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Validate required credentials
 	if cfg.APIKey == "" || cfg.TGAPIID == 0 || cfg.TGAPIHash == "" {
 		return fmt.Errorf("missing required credentials. Use flags or enable prompts")
 	}
@@ -107,10 +111,29 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("error searching user: %w", err)
 	}
 
-	printUserInfo(tgScanResp)
+	if exportJSON {
+		if err := exportToJSON(tgScanResp, query); err != nil {
+			return fmt.Errorf("error exporting to JSON: %w", err)
+		}
+	} else if exportCSV {
+		if err := exportToCSV(tgScanResp, query); err != nil {
+			return fmt.Errorf("error exporting to CSV: %w", err)
+		}
+	} else {
+		printUserInfo(tgScanResp)
+	}
+
+	var format telegram.OutputFormat
+	if exportJSON {
+		format = telegram.FormatJSON
+	} else if exportCSV {
+		format = telegram.FormatCSV
+	} else {
+		format = telegram.FormatJSON
+	}
 
 	ctx := context.Background()
-	if err := telegram.RunClient(ctx, cfg, &tgScanResp.Result.User, tgScanResp.Result.Groups); err != nil {
+	if err := telegram.RunClient(ctx, cfg, &types.User{Username: query}, tgScanResp.Result.Groups, format); err != nil {
 		return fmt.Errorf("error running Telegram client: %w", err)
 	}
 
@@ -146,4 +169,113 @@ func printUserInfo(tgScanResp *types.TGScanResponse) {
 		fmt.Printf("    Date Updated: %s\n", group.DateUpdated)
 	}
 	fmt.Println("")
+}
+
+func exportToJSON(resp *types.TGScanResponse, username string) error {
+	filename := username + "_tgscan.json"
+	file, err := os.Create(filename)
+	if err != nil {
+		return fmt.Errorf("error creating JSON file: %w", err)
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(resp); err != nil {
+		return fmt.Errorf("error encoding JSON: %w", err)
+	}
+
+	fmt.Printf("Results exported to JSON file: %s\n", filename)
+	return nil
+}
+
+func exportToCSV(resp *types.TGScanResponse, username string) error {
+	// Export username history
+	if err := exportUsernameHistoryCSV(resp); err != nil {
+		return err
+	}
+
+	// Export groups
+	if err := exportGroupsCSV(resp, username); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func exportUsernameHistoryCSV(resp *types.TGScanResponse) error {
+	historyFilename := resp.Result.User.Username + "_usernames_tgscan.csv"
+	file, err := os.Create(historyFilename)
+	if err != nil {
+		return fmt.Errorf("error creating username history CSV file: %w", err)
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+
+	headers := []string{"User ID", "Current Username", "Previous Username", "Date Changed"}
+	if err := writer.Write(headers); err != nil {
+		return fmt.Errorf("error writing CSV headers: %w", err)
+	}
+
+	// Always write the current username as a record
+	currentRecord := []string{
+		fmt.Sprintf("%d", resp.Result.User.ID),
+		resp.Result.User.Username,
+		"",  // No previous username for current
+		"",  // No date for current
+	}
+	if err := writer.Write(currentRecord); err != nil {
+		return fmt.Errorf("error writing CSV record: %w", err)
+	}
+
+	// Write historical usernames if any exist
+	for _, h := range resp.Result.UsernameHistory {
+		record := []string{
+			fmt.Sprintf("%d", resp.Result.User.ID),
+			resp.Result.User.Username,
+			h.Username,
+			h.Date,
+		}
+		if err := writer.Write(record); err != nil {
+			return fmt.Errorf("error writing CSV record: %w", err)
+		}
+	}
+
+	fmt.Printf("Username history exported to CSV file: %s\n", historyFilename)
+	return nil
+}
+
+func exportGroupsCSV(resp *types.TGScanResponse, username string) error {
+	groupsFilename := username + "_groups_tgscan.csv"
+	file, err := os.Create(groupsFilename)
+	if err != nil {
+		return fmt.Errorf("error creating groups CSV file: %w", err)
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+
+	headers := []string{"User ID", "User Username", "Group Title", "Group Username", "Date Updated"}
+	if err := writer.Write(headers); err != nil {
+		return fmt.Errorf("error writing CSV headers: %w", err)
+	}
+
+	for _, group := range resp.Result.Groups {
+		record := []string{
+			fmt.Sprintf("%d", resp.Result.User.ID),
+			resp.Result.User.Username,
+			group.Title,
+			group.Username,
+			group.DateUpdated,
+		}
+		if err := writer.Write(record); err != nil {
+			return fmt.Errorf("error writing CSV record: %w", err)
+		}
+	}
+
+	fmt.Printf("Groups exported to CSV file: %s\n", groupsFilename)
+	return nil
 }
