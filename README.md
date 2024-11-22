@@ -2,16 +2,6 @@
 
 Teleslurp is a command-line tool that allows you to search for and analyze Telegram users' activities across different groups and channels. It combines the TGScan API with Telegram's official API to provide comprehensive user information and message history.
 
-## Features
-
-- User information lookup (ID, username, first name, last name)
-- Username history tracking
-- ID history tracking
-- Group membership analysis
-- Message history search across multiple groups
-- Automatic session management
-- Secure credential storage
-
 ## Prerequisites
 
 - Go 1.16 or higher
@@ -19,11 +9,40 @@ Teleslurp is a command-line tool that allows you to search for and analyze Teleg
 - TGScan API key
 - A Telegram account for authentication
 
-# Installation Methods
+## Installation
 ```bash
-go install github.com/gnomegl/teleslurp/cmd/teleslurp@latest
+go install github.com/gnomegl/teleslurp
 ```
-The binary will be installed to your $GOPATH/bin directory. Make sure this directory is in your system's PATH.
+
+## Commands
+
+### Search Command
+```bash
+teleslurp search [username] [flags]
+```
+
+Search for a Telegram user's activity across groups and channels.
+
+Flags:
+- `--api-hash string`   Telegram API Hash
+- `--api-id int`        Telegram API ID
+- `--api-key string`    TGScan API key
+- `-h, --help`          Help for search command
+- `--no-prompt`         Disable interactive prompts
+
+### Completion Command
+```bash
+teleslurp completion [shell]
+```
+
+Generate shell completion scripts for bash, zsh, fish, or powershell.
+
+### Help Command
+```bash
+teleslurp help [command]
+```
+
+Get help about any command.
 
 ## Configuration
 
@@ -38,65 +57,22 @@ On first run, you'll be prompted to enter:
 4. Phone number (during authentication)
 5. Your 2FA password (if applicable)
 
-## Usage
+## Technical Details
 
-```bash
-teleslurp <username>
-```
-
-Example:
-```bash
-teleslurp ytcracka
-```
-
-### Authentication
-
-On first run, you'll need to authenticate with Telegram. The tool will:
-1. Request your phone number
-2. Send a verification code to your Telegram account
-3. Request 2FA password if enabled
-4. Store the session for future use
-
-## Output
-
-The tool provides detailed information including:
-
-1. User Information:
-   - Current ID and username
-   - First and last name
-   - Username history
-   - ID history
-
-2. Meta Information:
-   - Number of known groups
-   - Total groups found
-   - Operation costs
-
-3. Group Information:
-   - Group names and usernames
-   - Last update dates
-   - Message history for each group
-
-4. Message Details:
-   - Timestamp
-   - Content
-   - Direct message links
-   - Channel/group context
-
-## Rate Limiting
+### Rate Limiting
 
 The tool implements reasonable delays between requests:
 - 500ms between message searches
 - 2 seconds between group searches
 
-## Dependencies
+### Dependencies
 
+- github.com/spf13/cobra - CLI framework
 - github.com/gotd/td - Telegram client implementation
 - Standard Go libraries for HTTP requests and JSON handling
 
-## Security
+### Security
 
 - Credentials are stored locally in the user's config directory
 - Session data is encrypted and stored separately from configuration
 - API keys and credentials are never logged or transmitted except to their respective services
-
