@@ -2,6 +2,8 @@ module github.com/gnomegl/teleslurp
 
 go 1.23.2
 
+require github.com/gotd/td v0.112.0 // direct
+
 require (
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/go-faster/errors v0.7.1 // indirect
@@ -9,9 +11,11 @@ require (
 	github.com/go-faster/xor v1.0.0 // indirect
 	github.com/gotd/ige v0.2.2 // indirect
 	github.com/gotd/neo v0.1.5 // indirect
-	github.com/gotd/td v0.112.0 // direct
+	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/klauspost/compress v1.17.11 // indirect
 	github.com/segmentio/asm v1.2.0 // indirect
+	github.com/spf13/cobra v1.8.1 // indirect
+	github.com/spf13/pflag v1.0.5 // indirect
 	go.opentelemetry.io/otel v1.29.0 // indirect
 	go.opentelemetry.io/otel/trace v1.29.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
