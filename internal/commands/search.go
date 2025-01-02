@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 
 	"github.com/gnomegl/teleslurp/internal/config"
 	"github.com/gnomegl/teleslurp/internal/telegram"
@@ -15,10 +16,10 @@ import (
 )
 
 var (
-	apiKey    string
-	apiID     int
-	apiHash   string
-	noPrompt  bool
+	apiKey     string
+	apiID      int
+	apiHash    string
+	noPrompt   bool
 	exportJSON bool
 	exportCSV  bool
 )
@@ -105,7 +106,15 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	}
 
 	query := args[0]
-	
+
+	// check if query is a numeric id, if not, assume it's a username
+	var searchUser types.User
+	if id, err := strconv.ParseInt(query, 10, 64); err == nil {
+		searchUser = types.User{ID: id}
+	} else {
+		searchUser = types.User{Username: query}
+	}
+
 	tgScanResp, err := tgscan.SearchUser(cfg.APIKey, query)
 	if err != nil {
 		return fmt.Errorf("error searching user: %w", err)
@@ -133,7 +142,7 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	}
 
 	ctx := context.Background()
-	if err := telegram.RunClient(ctx, cfg, &types.User{Username: query}, tgScanResp.Result.Groups, format); err != nil {
+	if err := telegram.RunClient(ctx, cfg, &searchUser, tgScanResp.Result.Groups, format); err != nil {
 		return fmt.Errorf("error running Telegram client: %w", err)
 	}
 
@@ -223,8 +232,8 @@ func exportUsernameHistoryCSV(resp *types.TGScanResponse) error {
 	currentRecord := []string{
 		fmt.Sprintf("%d", resp.Result.User.ID),
 		resp.Result.User.Username,
-		"",  // No previous username for current
-		"",  // No date for current
+		"", // No previous username for current
+		"", // No date for current
 	}
 	if err := writer.Write(currentRecord); err != nil {
 		return fmt.Errorf("error writing CSV record: %w", err)

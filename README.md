@@ -18,10 +18,17 @@ go install github.com/gnomegl/teleslurp
 
 ### Search Command
 ```bash
-teleslurp search [username] [flags]
+teleslurp search [username|user_id] [flags]
 ```
 
-Search for a Telegram user's activity across groups and channels.
+Search for a Telegram user's activity across groups and channels. You can search using either:
+- A username (e.g., `teleslurp search johndoe`)
+- A numeric user ID (e.g., `teleslurp search 5338795474`)
+
+The tool will:
+1. Find the user's information and group memberships
+2. Crawl all accessible groups for messages from that user
+3. Export the results based on the specified format (JSON or CSV)
 
 Flags:
 - `--api-hash string`   Telegram API Hash

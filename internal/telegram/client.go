@@ -17,12 +17,12 @@ import (
 )
 
 type MessageData struct {
-	ChannelTitle string    `json:"channel_title"`
+	ChannelTitle    string `json:"channel_title"`
 	ChannelUsername string `json:"channel_username"`
-	MessageID    int      `json:"message_id"`
-	Date         string   `json:"date"`
-	Message      string   `json:"message"`
-	URL          string   `json:"url"`
+	MessageID       int    `json:"message_id"`
+	Date            string `json:"date"`
+	Message         string `json:"message"`
+	URL             string `json:"url"`
 }
 
 func exportMessagesToJSON(messages []MessageData, username string) error {
@@ -80,8 +80,8 @@ func exportMessagesToCSV(messages []MessageData, username string) error {
 type OutputFormat string
 
 const (
-    FormatJSON OutputFormat = "json"
-    FormatCSV  OutputFormat = "csv"
+	FormatJSON OutputFormat = "json"
+	FormatCSV  OutputFormat = "csv"
 )
 
 func RunClient(ctx context.Context, cfg *config.Config, searchUser *types.User, groups []types.Group, format OutputFormat) error {
@@ -135,35 +135,91 @@ func RunClient(ctx context.Context, cfg *config.Config, searchUser *types.User, 
 
 		api := client.API()
 
-		resolvedUser, err := api.ContactsResolveUsername(ctx, searchUser.Username)
-		if err != nil {
-			return fmt.Errorf("Error resolving username: %v\n", err)
-		}
+		// Convert username to ID if needed
+		var userID int64
+		var userAccessHash int64
 
-		var targetUser *tg.User
-		for _, u := range resolvedUser.Users {
-			if tgUser, ok := u.(*tg.User); ok && tgUser.Username == searchUser.Username {
-				targetUser = tgUser
-				break
+		if searchUser.Username != "" {
+			resolvedUser, err := api.ContactsResolveUsername(ctx, searchUser.Username)
+			if err != nil {
+				return fmt.Errorf("error resolving username: %w", err)
 			}
+
+			for _, u := range resolvedUser.Users {
+				if tgUser, ok := u.(*tg.User); ok && tgUser.Username == searchUser.Username {
+					userID = tgUser.ID
+					userAccessHash = tgUser.AccessHash
+					break
+				}
+			}
+			if userID == 0 {
+				return fmt.Errorf("could not find user with username: %s", searchUser.Username)
+			}
+		} else {
+			userID = searchUser.ID
+			// for id based searches, we try to use a minimal access hash
+			// (this is because we don't have access to the real access hash without being in a shared channel)
+			// TODO: add a way to get the real access hash
+			userAccessHash = userID
 		}
 
-		if targetUser == nil {
-			return fmt.Errorf("Could not find user information")
-		}
-
-		fmt.Printf("Found user %s with ID: %d and AccessHash: %d\n",
-			targetUser.Username, targetUser.ID, targetUser.AccessHash)
+		fmt.Printf("Searching messages for user ID: %d\n", userID)
 
 		var allMessages []MessageData
 		for _, group := range groups {
-			resolvedPeer, err := api.ContactsResolveUsername(ctx, group.Username)
+			// convert channel username to ID
+			var channelID int64
+			var channelAccessHash int64
+
+			if group.Username != "" {
+				resolvedPeer, err := api.ContactsResolveUsername(ctx, group.Username)
+				if err != nil {
+					fmt.Printf("Error resolving channel %s: %v\n", group.Title, err)
+					continue
+				}
+
+				if len(resolvedPeer.Chats) == 0 {
+					fmt.Printf("Could not find channel %s\n", group.Title)
+					continue
+				}
+
+				channel, ok := resolvedPeer.Chats[0].(*tg.Channel)
+				if !ok {
+					fmt.Printf("Group %s is not a channel\n", group.Title)
+					continue
+				}
+				channelID = channel.ID
+				channelAccessHash = channel.AccessHash
+			} else {
+				channelID = group.ID
+			}
+
+			chatsResult, err := api.ChannelsGetChannels(ctx, []tg.InputChannelClass{
+				&tg.InputChannel{
+					ChannelID:  channelID,
+					AccessHash: channelAccessHash,
+				},
+			})
 			if err != nil {
+				fmt.Printf("Error getting channel %s by ID: %v\n", group.Title, err)
 				continue
 			}
 
-			channel, ok := resolvedPeer.Chats[0].(*tg.Channel)
+			//
+			chats, ok := chatsResult.(*tg.MessagesChats)
 			if !ok {
+				fmt.Printf("Unexpected response type for channel %s\n", group.Title)
+				continue
+			}
+
+			if len(chats.Chats) == 0 {
+				fmt.Printf("Could not find channel %s\n", group.Title)
+				continue
+			}
+
+			channel, ok := chats.Chats[0].(*tg.Channel)
+			if !ok {
+				fmt.Printf("Group %s is not a channel\n", group.Title)
 				continue
 			}
 
@@ -178,8 +234,8 @@ func RunClient(ctx context.Context, cfg *config.Config, searchUser *types.User, 
 					Q:      "",
 					Filter: &tg.InputMessagesFilterEmpty{},
 					FromID: &tg.InputPeerUser{
-						UserID:     targetUser.ID,
-						AccessHash: targetUser.AccessHash,
+						UserID:     userID,
+						AccessHash: userAccessHash,
 					},
 					MinDate:   0,
 					MaxDate:   int(time.Now().Unix()),
@@ -212,12 +268,12 @@ func RunClient(ctx context.Context, cfg *config.Config, searchUser *types.User, 
 						matchCount++
 						messageURL := fmt.Sprintf("https://t.me/%s/%d", group.Username, m.ID)
 						messageData := MessageData{
-							ChannelTitle: group.Title,
+							ChannelTitle:    group.Title,
 							ChannelUsername: group.Username,
-							MessageID: m.ID,
-							Date: time.Unix(int64(m.Date), 0).Format("2006-01-02 15:04:05"),
-							Message: m.Message,
-							URL: messageURL,
+							MessageID:       m.ID,
+							Date:            time.Unix(int64(m.Date), 0).Format("2006-01-02 15:04:05"),
+							Message:         m.Message,
+							URL:             messageURL,
 						}
 						allMessages = append(allMessages, messageData)
 
