@@ -4,8 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/csv"
-	"encoding/json"
 	"fmt"
 	"os"
 	"regexp"
@@ -13,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/gnomegl/teleslurp/internal/config"
+	"github.com/gnomegl/teleslurp/internal/export"
 	"github.com/gnomegl/teleslurp/internal/telegram"
 	"github.com/gnomegl/teleslurp/internal/tgscan"
 	"github.com/gnomegl/teleslurp/internal/types"
@@ -202,21 +201,8 @@ func printUserInfo(tgScanResp *types.TGScanResponse) {
 }
 
 func exportToJSON(resp *types.TGScanResponse, username string) error {
-	filename := username + "_tgscan.json"
-	file, err := os.Create(filename)
-	if err != nil {
-		return fmt.Errorf("error creating JSON file: %w", err)
-	}
-	defer file.Close()
-
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(resp); err != nil {
-		return fmt.Errorf("error encoding JSON: %w", err)
-	}
-
-	fmt.Printf("Results exported to JSON file: %s\n", filename)
-	return nil
+	filename := export.FormatFilename(username, "tgscan", "json")
+	return export.WriteJSON(resp, filename)
 }
 
 func exportToCSV(resp *types.TGScanResponse, username string) error {
@@ -234,19 +220,16 @@ func exportToCSV(resp *types.TGScanResponse, username string) error {
 }
 
 func exportUsernameHistoryCSV(resp *types.TGScanResponse) error {
-	historyFilename := resp.Result.User.Username + "_usernames_tgscan.csv"
-	file, err := os.Create(historyFilename)
+	historyFilename := export.FormatFilename(resp.Result.User.Username, "usernames_tgscan", "csv")
+	writer, err := export.NewCSVWriter(historyFilename)
 	if err != nil {
-		return fmt.Errorf("error creating username history CSV file: %w", err)
+		return err
 	}
-	defer file.Close()
-
-	writer := csv.NewWriter(file)
-	defer writer.Flush()
+	defer writer.Close()
 
 	headers := []string{"User ID", "Current Username", "Previous Username", "Date Changed"}
-	if err := writer.Write(headers); err != nil {
-		return fmt.Errorf("error writing CSV headers: %w", err)
+	if err := writer.WriteHeader(headers); err != nil {
+		return err
 	}
 
 	// Always write the current username as a record
@@ -256,8 +239,8 @@ func exportUsernameHistoryCSV(resp *types.TGScanResponse) error {
 		"", // No previous username for current
 		"", // No date for current
 	}
-	if err := writer.Write(currentRecord); err != nil {
-		return fmt.Errorf("error writing CSV record: %w", err)
+	if err := writer.WriteRecord(currentRecord); err != nil {
+		return err
 	}
 
 	// Write historical usernames if any exist
@@ -268,8 +251,8 @@ func exportUsernameHistoryCSV(resp *types.TGScanResponse) error {
 			h.Username,
 			h.Date,
 		}
-		if err := writer.Write(record); err != nil {
-			return fmt.Errorf("error writing CSV record: %w", err)
+		if err := writer.WriteRecord(record); err != nil {
+			return err
 		}
 	}
 
@@ -278,19 +261,16 @@ func exportUsernameHistoryCSV(resp *types.TGScanResponse) error {
 }
 
 func exportGroupsCSV(resp *types.TGScanResponse, username string) error {
-	groupsFilename := username + "_groups_tgscan.csv"
-	file, err := os.Create(groupsFilename)
+	groupsFilename := export.FormatFilename(username, "groups_tgscan", "csv")
+	writer, err := export.NewCSVWriter(groupsFilename)
 	if err != nil {
-		return fmt.Errorf("error creating groups CSV file: %w", err)
+		return err
 	}
-	defer file.Close()
-
-	writer := csv.NewWriter(file)
-	defer writer.Flush()
+	defer writer.Close()
 
 	headers := []string{"User ID", "User Username", "Group Title", "Group Username", "Date Updated"}
-	if err := writer.Write(headers); err != nil {
-		return fmt.Errorf("error writing CSV headers: %w", err)
+	if err := writer.WriteHeader(headers); err != nil {
+		return err
 	}
 
 	for _, group := range resp.Result.Groups {
@@ -301,8 +281,8 @@ func exportGroupsCSV(resp *types.TGScanResponse, username string) error {
 			group.Username,
 			group.DateUpdated,
 		}
-		if err := writer.Write(record); err != nil {
-			return fmt.Errorf("error writing CSV record: %w", err)
+		if err := writer.WriteRecord(record); err != nil {
+			return err
 		}
 	}
 
