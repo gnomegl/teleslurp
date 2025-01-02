@@ -48,11 +48,15 @@ Note: Some channel information may be unavailable depending on your access level
 - `--api-hash string`   Telegram API Hash (optional if already set in config)
 - `--api-id int`        Telegram API ID (optional if already set in config)
 - `--api-key string`    TGScan API key (optional if already set in config)
-- `--input-file string` Input file containing Telegram channels/groups to search
-- `--csv`               Export results to CSV file
+- `--input-file string` Input file containing Telegram channels/groups to search (CSV or text file)
+- `--csv`               Export results and channel metadata to CSV files
 - `-h, --help`          Help for search command
-- `--json`              Export results to JSON file
+- `--json`              Export results and channel metadata to JSON files
 - `--no-prompt`         Disable interactive prompts
+
+Note: When using `--csv` or `--json`, two files will be created:
+- `username_messages.[csv|json]` - Contains all messages found
+- `username_channel_metadata.[csv|json]` - Contains detailed information about each channel
 
 ### Completion Command
 ```bash
@@ -67,6 +71,36 @@ teleslurp help [command]
 ```
 
 Get help about any command.
+
+## Output
+
+### Summary Statistics
+After the search completes, the tool displays a comprehensive summary:
+
+For each channel with messages:
+- Channel name and username/link
+- Number of messages found
+- Member count
+- Date of user's first message
+- Admin status
+
+Overall statistics:
+- Total number of channels with messages
+- Total messages found
+- Total members in channels
+- Average messages per channel
+
+### Export Formats
+When using CSV or JSON export, each message will include:
+- Channel Information:
+  - Title and username
+  - List of channel administrators (if accessible)
+  - Total member count
+  - When the target user joined the channel (if accessible)
+- Message Details:
+  - Message ID and content
+  - Date and time
+  - Direct link to message
 
 ## Configuration
 
