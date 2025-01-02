@@ -15,6 +15,7 @@ import (
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/tg"
+	"github.com/schollz/progressbar/v3"
 )
 
 type MessageData struct {
@@ -29,7 +30,7 @@ type MessageData struct {
 type ChannelMetadata struct {
 	ChannelTitle     string `json:"channel_title"`
 	ChannelUsername  string `json:"channel_username"`
-  ChannelLink      string `json:"channel_link"`
+	ChannelLink      string `json:"channel_link"`
 	ChannelAdmins    string `json:"channel_admins"`
 	MemberCount      int    `json:"member_count"`
 	UserFirstMessage string `json:"user_first_message"`
@@ -211,7 +212,7 @@ func RunClient(ctx context.Context, cfg *config.Config, searchUser *types.User, 
 
 		api := client.API()
 
-		// Convert username to ID if needed
+		// Convert username to tg id if needed
 		var userID int64
 		var userAccessHash int64
 
@@ -235,7 +236,9 @@ func RunClient(ctx context.Context, cfg *config.Config, searchUser *types.User, 
 			userID = searchUser.ID
 			// for id based searches, we try to use a minimal access hash
 			// (this is because we don't have access to the real access hash without being in a shared channel)
-			// TODO: add a way to get the real access hash
+
+			// TODO: add a way to get the real access hash, e.g. by using a shared channel like joining
+			// and then leaving once we have the access hash
 			userAccessHash = userID
 		}
 
@@ -243,7 +246,32 @@ func RunClient(ctx context.Context, cfg *config.Config, searchUser *types.User, 
 
 		var allMessages []MessageData
 		var allMetadata []ChannelMetadata
-		for _, group := range groups {
+
+		// Initialize progress bar for channel search
+		bar := progressbar.NewOptions(len(groups),
+			progressbar.OptionSetDescription("Searching channels"),
+			progressbar.OptionSetWidth(30),
+			progressbar.OptionShowCount(),
+			progressbar.OptionSetPredictTime(false),
+			progressbar.OptionSetElapsedTime(true),
+			progressbar.OptionSetRenderBlankState(true),
+			progressbar.OptionThrottle(100*time.Millisecond),
+			progressbar.OptionUseANSICodes(true),
+			progressbar.OptionEnableColorCodes(true),
+			progressbar.OptionSetTheme(progressbar.Theme{
+				Saucer:        "━",
+				SaucerHead:    "▶",
+				SaucerPadding: "─",
+				BarStart:      "[",
+				BarEnd:        "]",
+			}),
+		)
+
+		for groupIdx, group := range groups {
+			// Move cursor up one line and clear it
+			fmt.Print("\033[1A\033[K")
+			fmt.Printf("[%d/%d] Checking %s...\n", groupIdx+1, len(groups), group.Title)
+
 			// convert channel username to ID
 			var channelID int64
 			var channelAccessHash int64
@@ -287,7 +315,6 @@ func RunClient(ctx context.Context, cfg *config.Config, searchUser *types.User, 
 			var memberCount int
 			var channelAdmins []string
 
-			// Get channel info
 			var chats []tg.ChatClass
 			switch result := chatsResult.(type) {
 			case *tg.MessagesChats:
@@ -343,59 +370,7 @@ func RunClient(ctx context.Context, cfg *config.Config, searchUser *types.User, 
 			}
 
 			var firstMessageDate time.Time
-
-			// Get messages
-			messages, err := api.MessagesSearch(ctx, &tg.MessagesSearchRequest{
-				Peer: &tg.InputPeerChannel{
-					ChannelID:  channelID,
-					AccessHash: channelAccessHash,
-				},
-				Q:         "",
-				Filter:    &tg.InputMessagesFilterEmpty{},
-				MinDate:   0,
-				MaxDate:   int(time.Now().Unix()),
-				OffsetID:  0,
-				AddOffset: 0,
-				Limit:     100,
-				MaxID:     0,
-				MinID:     0,
-				FromID: &tg.InputPeerUser{
-					UserID:     userID,
-					AccessHash: userAccessHash,
-				},
-				Hash: 0,
-			})
-
-			if err != nil {
-				continue
-			}
-
-			switch m := messages.(type) {
-			case *tg.MessagesChannelMessages:
-				for _, msg := range m.Messages {
-					if message, ok := msg.(*tg.Message); ok {
-						messageURL := fmt.Sprintf("https://t.me/%s/%d", channelUsername, message.ID)
-						if channelUsername == "" {
-							messageURL = fmt.Sprintf("https://t.me/c/%d/%d", channelID, message.ID)
-						}
-
-						messageDate := time.Unix(int64(message.Date), 0)
-						if firstMessageDate.IsZero() || messageDate.Before(firstMessageDate) {
-							firstMessageDate = messageDate
-						}
-
-						messageData := MessageData{
-							ChannelTitle:    channelTitle,
-							ChannelUsername: channelUsername,
-							MessageID:       message.ID,
-							Date:            messageDate.Format("2006-01-02 15:04:05"),
-							Message:         message.Message,
-							URL:             messageURL,
-						}
-						allMessages = append(allMessages, messageData)
-					}
-				}
-			}
+			var messages []MessageData
 
 			offset := 0
 			matchCount := 0
@@ -422,13 +397,13 @@ func RunClient(ctx context.Context, cfg *config.Config, searchUser *types.User, 
 
 				result, err := api.MessagesSearch(ctx, req)
 				if err != nil {
-					fmt.Printf("Error searching messages in %s: %v\n", group.Title, err)
+					fmt.Printf("Error getting message count in %s: %v\n", channelTitle, err)
 					break
 				}
 
 				msgs, ok := result.(*tg.MessagesChannelMessages)
 				if !ok {
-					fmt.Printf("Unexpected response type for %s\n", group.Title)
+					fmt.Printf("Unexpected response type for %s\n", channelTitle)
 					break
 				}
 
@@ -457,18 +432,11 @@ func RunClient(ctx context.Context, cfg *config.Config, searchUser *types.User, 
 							Message:         m.Message,
 							URL:             messageURL,
 						}
-						allMessages = append(allMessages, messageData)
-
-						fmt.Printf("\nMessage #%d:\n", matchCount)
-						fmt.Printf("Channel: %s\n", messageData.ChannelTitle)
-						fmt.Printf("Date: %s\n", messageData.Date)
-						fmt.Printf("Message: %s\n", messageData.Message)
-						fmt.Printf("Link: %s\n", messageData.URL)
+						messages = append(messages, messageData)
 					}
 				}
 
 				offset += len(msgs.Messages)
-
 				time.Sleep(500 * time.Millisecond)
 
 				if len(msgs.Messages) < 100 {
@@ -477,35 +445,94 @@ func RunClient(ctx context.Context, cfg *config.Config, searchUser *types.User, 
 			}
 
 			if matchCount > 0 {
-				fmt.Printf("\nFound %d messages from user in %s\n", matchCount, group.Title)
-			} else {
-				fmt.Printf("No messages found from user in %s\n", group.Title)
+				// Move cursor up one line and clear it
+				fmt.Print("\033[1A\033[K")
+				fmt.Printf("Found %d messages in %s\n", matchCount, channelTitle)
 			}
 
-			// After collecting all messages, add the metadata
-			userFirstMessage := ""
-			if !firstMessageDate.IsZero() {
-				userFirstMessage = firstMessageDate.Format("2006-01-02 15:04:05")
+			allMessages = append(allMessages, messages...)
+
+			if matchCount > 0 {
+				// After collecting all messages, add the metadata
+				userFirstMessage := ""
+				if !firstMessageDate.IsZero() {
+					userFirstMessage = firstMessageDate.Format("2006-01-02 15:04:05")
+				}
+
+				channelLink := ""
+				if channelUsername != "" {
+					channelLink = fmt.Sprintf("https://t.me/%s", channelUsername)
+				} else {
+					channelLink = fmt.Sprintf("https://t.me/c/%d", channelID)
+				}
+
+				metadata := ChannelMetadata{
+					ChannelTitle:     channelTitle,
+					ChannelUsername:  channelUsername,
+					ChannelLink:      channelLink,
+					ChannelAdmins:    strings.Join(channelAdmins, ", "),
+					MemberCount:      memberCount,
+					UserFirstMessage: userFirstMessage,
+				}
+				allMetadata = append(allMetadata, metadata)
 			}
 
-			channelLink := ""
-			if channelUsername != "" {
-				channelLink = fmt.Sprintf("https://t.me/%s", channelUsername)
-			} else {
-				channelLink = fmt.Sprintf("https://t.me/c/%d", channelID)
-			}
-			
-			metadata := ChannelMetadata{
-				ChannelTitle:     channelTitle,
-				ChannelUsername:  channelUsername,
-				ChannelLink:      channelLink,
-				ChannelAdmins:    strings.Join(channelAdmins, ", "),
-				MemberCount:      memberCount,
-				UserFirstMessage: userFirstMessage,
-			}
-			allMetadata = append(allMetadata, metadata)
-
+			bar.Add(1)
 			time.Sleep(2 * time.Second)
+		}
+
+		// Print summary after all channels are processed
+		fmt.Printf("\n\nSummary of channels with messages:\n")
+		fmt.Printf("================================\n")
+		
+		var totalMessages int
+		var totalMembers int
+		for _, metadata := range allMetadata {
+			isAdmin := false
+			adminList := strings.Split(metadata.ChannelAdmins, ", ")
+			for _, admin := range adminList {
+				if admin == searchUser.Username {
+					isAdmin = true
+					break
+				}
+			}
+
+			channelInfo := fmt.Sprintf("%s (@%s)", metadata.ChannelTitle, metadata.ChannelUsername)
+			if metadata.ChannelUsername == "" {
+				channelInfo = fmt.Sprintf("%s (%s)", metadata.ChannelTitle, metadata.ChannelLink)
+			}
+
+			messageCount := 0
+			for _, msg := range allMessages {
+				if msg.ChannelUsername == metadata.ChannelUsername {
+					messageCount++
+				}
+			}
+			totalMessages += messageCount
+			totalMembers += metadata.MemberCount
+
+			if isAdmin {
+				fmt.Printf("\033[31m%s\n", channelInfo) // Red color for admin channels
+				fmt.Printf("  • Admin Status: Yes\033[0m\n")
+			} else {
+				fmt.Printf("%s\n", channelInfo)
+			}
+			fmt.Printf("  • Messages: %d\n", messageCount)
+			fmt.Printf("  • Members: %d\n", metadata.MemberCount)
+			fmt.Printf("  • First message: %s\n", metadata.UserFirstMessage)
+			fmt.Printf("  • Link: %s\n\n", metadata.ChannelLink)
+		}
+
+		if len(allMetadata) > 0 {
+			fmt.Printf("Total Statistics:\n")
+			fmt.Printf("================\n")
+			fmt.Printf("Channels with messages: %d\n", len(allMetadata))
+			fmt.Printf("Total messages found: %d\n", totalMessages)
+			fmt.Printf("Total members in channels: %d\n", totalMembers)
+			avgMessagesPerChannel := float64(totalMessages) / float64(len(allMetadata))
+			fmt.Printf("Average messages per channel: %.1f\n", avgMessagesPerChannel)
+		} else {
+			fmt.Printf("\nNo messages found in any channels.\n")
 		}
 
 		if len(allMessages) > 0 {
