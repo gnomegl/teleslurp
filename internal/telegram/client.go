@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gnomegl/teleslurp/internal/config"
@@ -23,6 +24,15 @@ type MessageData struct {
 	Date            string `json:"date"`
 	Message         string `json:"message"`
 	URL             string `json:"url"`
+}
+
+type ChannelMetadata struct {
+	ChannelTitle     string `json:"channel_title"`
+	ChannelUsername  string `json:"channel_username"`
+  ChannelLink      string `json:"channel_link"`
+	ChannelAdmins    string `json:"channel_admins"`
+	MemberCount      int    `json:"member_count"`
+	UserFirstMessage string `json:"user_first_message"`
 }
 
 func exportMessagesToJSON(messages []MessageData, username string) error {
@@ -54,7 +64,14 @@ func exportMessagesToCSV(messages []MessageData, username string) error {
 	writer := csv.NewWriter(file)
 	defer writer.Flush()
 
-	headers := []string{"Channel Title", "Channel Username", "Message ID", "Date", "Message", "URL"}
+	headers := []string{
+		"Channel Title",
+		"Channel Username",
+		"Message ID",
+		"Date",
+		"Message",
+		"URL",
+	}
 	if err := writer.Write(headers); err != nil {
 		return fmt.Errorf("error writing CSV headers: %w", err)
 	}
@@ -74,6 +91,65 @@ func exportMessagesToCSV(messages []MessageData, username string) error {
 	}
 
 	fmt.Printf("Messages exported to CSV file: %s\n", filename)
+	return nil
+}
+
+func exportChannelMetadataToJSON(metadata []ChannelMetadata, username string) error {
+	filename := fmt.Sprintf("%s_channel_metadata.json", username)
+	file, err := os.Create(filename)
+	if err != nil {
+		return fmt.Errorf("error creating JSON file: %w", err)
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(metadata); err != nil {
+		return fmt.Errorf("error encoding JSON: %w", err)
+	}
+
+	fmt.Printf("Channel metadata exported to JSON file: %s\n", filename)
+	return nil
+}
+
+func exportChannelMetadataToCSV(metadata []ChannelMetadata, username string) error {
+	filename := fmt.Sprintf("%s_channel_metadata.csv", username)
+	file, err := os.Create(filename)
+	if err != nil {
+		return fmt.Errorf("error creating CSV file: %w", err)
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+
+	headers := []string{
+		"Channel Title",
+		"Channel Username",
+		"Channel Link",
+		"Channel Admins",
+		"Member Count",
+		"User Join Date",
+	}
+	if err := writer.Write(headers); err != nil {
+		return fmt.Errorf("error writing CSV headers: %w", err)
+	}
+
+	for _, ch := range metadata {
+		record := []string{
+			ch.ChannelTitle,
+			ch.ChannelUsername,
+			ch.ChannelLink,
+			ch.ChannelAdmins,
+			fmt.Sprintf("%d", ch.MemberCount),
+			ch.UserFirstMessage,
+		}
+		if err := writer.Write(record); err != nil {
+			return fmt.Errorf("error writing CSV record: %w", err)
+		}
+	}
+
+	fmt.Printf("Channel metadata exported to CSV file: %s\n", filename)
 	return nil
 }
 
@@ -166,6 +242,7 @@ func RunClient(ctx context.Context, cfg *config.Config, searchUser *types.User, 
 		fmt.Printf("Searching messages for user ID: %d\n", userID)
 
 		var allMessages []MessageData
+		var allMetadata []ChannelMetadata
 		for _, group := range groups {
 			// convert channel username to ID
 			var channelID int64
@@ -174,24 +251,26 @@ func RunClient(ctx context.Context, cfg *config.Config, searchUser *types.User, 
 			if group.Username != "" {
 				resolvedPeer, err := api.ContactsResolveUsername(ctx, group.Username)
 				if err != nil {
-					fmt.Printf("Error resolving channel %s: %v\n", group.Title, err)
+					fmt.Printf("Could not find channel %s\n", group.Username)
 					continue
 				}
 
 				if len(resolvedPeer.Chats) == 0 {
-					fmt.Printf("Could not find channel %s\n", group.Title)
+					fmt.Printf("Could not find channel %s\n", group.Username)
 					continue
 				}
 
 				channel, ok := resolvedPeer.Chats[0].(*tg.Channel)
 				if !ok {
-					fmt.Printf("Group %s is not a channel\n", group.Title)
+					fmt.Printf("Could not find channel %s\n", group.Username)
 					continue
 				}
 				channelID = channel.ID
 				channelAccessHash = channel.AccessHash
 			} else {
 				channelID = group.ID
+				// For channel IDs, we can try using the ID as access hash
+				channelAccessHash = group.ID
 			}
 
 			chatsResult, err := api.ChannelsGetChannels(ctx, []tg.InputChannelClass{
@@ -201,26 +280,121 @@ func RunClient(ctx context.Context, cfg *config.Config, searchUser *types.User, 
 				},
 			})
 			if err != nil {
-				fmt.Printf("Error getting channel %s by ID: %v\n", group.Title, err)
 				continue
 			}
 
-			//
-			chats, ok := chatsResult.(*tg.MessagesChats)
-			if !ok {
-				fmt.Printf("Unexpected response type for channel %s\n", group.Title)
+			var channelTitle, channelUsername string
+			var memberCount int
+			var channelAdmins []string
+
+			// Get channel info
+			var chats []tg.ChatClass
+			switch result := chatsResult.(type) {
+			case *tg.MessagesChats:
+				chats = result.Chats
+			case *tg.MessagesChatsSlice:
+				chats = result.Chats
+			default:
 				continue
 			}
 
-			if len(chats.Chats) == 0 {
-				fmt.Printf("Could not find channel %s\n", group.Title)
+			// Get channel info
+			for _, chat := range chats {
+				if channel, ok := chat.(*tg.Channel); ok {
+					channelTitle = channel.Title
+					channelUsername = channel.Username
+
+					// Get full channel info to ensure we have participant count
+					fullChannel, err := api.ChannelsGetFullChannel(ctx, &tg.InputChannel{
+						ChannelID:  channelID,
+						AccessHash: channelAccessHash,
+					})
+					if err == nil {
+						if fc, ok := fullChannel.FullChat.(*tg.ChannelFull); ok {
+							memberCount = fc.ParticipantsCount
+						}
+					}
+
+					// Try to get admin info
+					admins, err := api.ChannelsGetParticipants(ctx, &tg.ChannelsGetParticipantsRequest{
+						Channel: &tg.InputChannel{
+							ChannelID:  channelID,
+							AccessHash: channelAccessHash,
+						},
+						Filter: &tg.ChannelParticipantsAdmins{},
+						Offset: 0,
+						Limit:  100,
+					})
+					if err == nil {
+						if participants, ok := admins.(*tg.ChannelsChannelParticipants); ok {
+							for _, user := range participants.Users {
+								if u, ok := user.(*tg.User); ok {
+									admin := u.Username
+									if admin == "" {
+										admin = fmt.Sprintf("%s %s", u.FirstName, u.LastName)
+									}
+									channelAdmins = append(channelAdmins, admin)
+								}
+							}
+						}
+					}
+					break
+				}
+			}
+
+			var firstMessageDate time.Time
+
+			// Get messages
+			messages, err := api.MessagesSearch(ctx, &tg.MessagesSearchRequest{
+				Peer: &tg.InputPeerChannel{
+					ChannelID:  channelID,
+					AccessHash: channelAccessHash,
+				},
+				Q:         "",
+				Filter:    &tg.InputMessagesFilterEmpty{},
+				MinDate:   0,
+				MaxDate:   int(time.Now().Unix()),
+				OffsetID:  0,
+				AddOffset: 0,
+				Limit:     100,
+				MaxID:     0,
+				MinID:     0,
+				FromID: &tg.InputPeerUser{
+					UserID:     userID,
+					AccessHash: userAccessHash,
+				},
+				Hash: 0,
+			})
+
+			if err != nil {
 				continue
 			}
 
-			channel, ok := chats.Chats[0].(*tg.Channel)
-			if !ok {
-				fmt.Printf("Group %s is not a channel\n", group.Title)
-				continue
+			switch m := messages.(type) {
+			case *tg.MessagesChannelMessages:
+				for _, msg := range m.Messages {
+					if message, ok := msg.(*tg.Message); ok {
+						messageURL := fmt.Sprintf("https://t.me/%s/%d", channelUsername, message.ID)
+						if channelUsername == "" {
+							messageURL = fmt.Sprintf("https://t.me/c/%d/%d", channelID, message.ID)
+						}
+
+						messageDate := time.Unix(int64(message.Date), 0)
+						if firstMessageDate.IsZero() || messageDate.Before(firstMessageDate) {
+							firstMessageDate = messageDate
+						}
+
+						messageData := MessageData{
+							ChannelTitle:    channelTitle,
+							ChannelUsername: channelUsername,
+							MessageID:       message.ID,
+							Date:            messageDate.Format("2006-01-02 15:04:05"),
+							Message:         message.Message,
+							URL:             messageURL,
+						}
+						allMessages = append(allMessages, messageData)
+					}
+				}
 			}
 
 			offset := 0
@@ -228,8 +402,8 @@ func RunClient(ctx context.Context, cfg *config.Config, searchUser *types.User, 
 			for {
 				req := &tg.MessagesSearchRequest{
 					Peer: &tg.InputPeerChannel{
-						ChannelID:  channel.ID,
-						AccessHash: channel.AccessHash,
+						ChannelID:  channelID,
+						AccessHash: channelAccessHash,
 					},
 					Q:      "",
 					Filter: &tg.InputMessagesFilterEmpty{},
@@ -237,13 +411,12 @@ func RunClient(ctx context.Context, cfg *config.Config, searchUser *types.User, 
 						UserID:     userID,
 						AccessHash: userAccessHash,
 					},
-					MinDate:   0,
-					MaxDate:   int(time.Now().Unix()),
-					OffsetID:  0,
-					AddOffset: offset,
-					Limit:     1000,
 					MaxID:     0,
 					MinID:     0,
+					MinDate:   0,
+					MaxDate:   int(time.Now().Unix()),
+					AddOffset: offset,
+					Limit:     100,
 					Hash:      0,
 				}
 
@@ -266,12 +439,21 @@ func RunClient(ctx context.Context, cfg *config.Config, searchUser *types.User, 
 				for _, msg := range msgs.Messages {
 					if m, ok := msg.(*tg.Message); ok {
 						matchCount++
-						messageURL := fmt.Sprintf("https://t.me/%s/%d", group.Username, m.ID)
+						messageURL := fmt.Sprintf("https://t.me/%s/%d", channelUsername, m.ID)
+						if channelUsername == "" {
+							messageURL = fmt.Sprintf("https://t.me/c/%d/%d", channelID, m.ID)
+						}
+
+						messageDate := time.Unix(int64(m.Date), 0)
+						if firstMessageDate.IsZero() || messageDate.Before(firstMessageDate) {
+							firstMessageDate = messageDate
+						}
+
 						messageData := MessageData{
-							ChannelTitle:    group.Title,
-							ChannelUsername: group.Username,
+							ChannelTitle:    channelTitle,
+							ChannelUsername: channelUsername,
 							MessageID:       m.ID,
-							Date:            time.Unix(int64(m.Date), 0).Format("2006-01-02 15:04:05"),
+							Date:            messageDate.Format("2006-01-02 15:04:05"),
 							Message:         m.Message,
 							URL:             messageURL,
 						}
@@ -300,6 +482,29 @@ func RunClient(ctx context.Context, cfg *config.Config, searchUser *types.User, 
 				fmt.Printf("No messages found from user in %s\n", group.Title)
 			}
 
+			// After collecting all messages, add the metadata
+			userFirstMessage := ""
+			if !firstMessageDate.IsZero() {
+				userFirstMessage = firstMessageDate.Format("2006-01-02 15:04:05")
+			}
+
+			channelLink := ""
+			if channelUsername != "" {
+				channelLink = fmt.Sprintf("https://t.me/%s", channelUsername)
+			} else {
+				channelLink = fmt.Sprintf("https://t.me/c/%d", channelID)
+			}
+			
+			metadata := ChannelMetadata{
+				ChannelTitle:     channelTitle,
+				ChannelUsername:  channelUsername,
+				ChannelLink:      channelLink,
+				ChannelAdmins:    strings.Join(channelAdmins, ", "),
+				MemberCount:      memberCount,
+				UserFirstMessage: userFirstMessage,
+			}
+			allMetadata = append(allMetadata, metadata)
+
 			time.Sleep(2 * time.Second)
 		}
 
@@ -312,6 +517,21 @@ func RunClient(ctx context.Context, cfg *config.Config, searchUser *types.User, 
 			case FormatCSV:
 				if err := exportMessagesToCSV(allMessages, searchUser.Username); err != nil {
 					fmt.Printf("Warning: Failed to export messages to CSV: %v\n", err)
+				}
+			default:
+				return fmt.Errorf("unsupported output format: %s", format)
+			}
+		}
+
+		if len(allMetadata) > 0 {
+			switch format {
+			case FormatJSON:
+				if err := exportChannelMetadataToJSON(allMetadata, searchUser.Username); err != nil {
+					fmt.Printf("Warning: Failed to export channel metadata to JSON: %v\n", err)
+				}
+			case FormatCSV:
+				if err := exportChannelMetadataToCSV(allMetadata, searchUser.Username); err != nil {
+					fmt.Printf("Warning: Failed to export channel metadata to CSV: %v\n", err)
 				}
 			default:
 				return fmt.Errorf("unsupported output format: %s", format)

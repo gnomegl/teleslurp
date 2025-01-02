@@ -1,6 +1,6 @@
 # Teleslurp
 
-Teleslurp is a command-line tool that allows you to search for and analyze Telegram users' activities across different groups and channels. It combines the TGScan API with Telegram's official API to provide comprehensive user information and message history.
+Teleslurp is a command-line tool that allows you to search for and analyze Telegram users' activities across different groups and channels. It has built-in support for the TGScan API with Telegram's official API to provide comprehensive user information and message history.
 
 ## Prerequisites
 
@@ -30,10 +30,25 @@ The tool will:
 2. Crawl all accessible groups for messages from that user
 3. Export the results based on the specified format (JSON or CSV)
 
-Flags:
-- `--api-hash string`   Telegram API Hash
-- `--api-id int`        Telegram API ID
-- `--api-key string`    TGScan API key
+#### Output Format
+When using CSV or JSON export, each message will include:
+- Channel Information:
+  - Title and username
+  - List of channel administrators (if accessible)
+  - Total member count
+  - When the target user joined the channel (if accessible)
+- Message Details:
+  - Message ID and content
+  - Date and time
+  - Direct link to message
+
+Note: Some channel information may be unavailable depending on your access level and the channel's privacy settings.
+
+#### Flags
+- `--api-hash string`   Telegram API Hash (optional if already set in config)
+- `--api-id int`        Telegram API ID (optional if already set in config)
+- `--api-key string`    TGScan API key (optional if already set in config)
+- `--input-file string` Input file containing Telegram channels/groups to search
 - `--csv`               Export results to CSV file
 - `-h, --help`          Help for search command
 - `--json`              Export results to JSON file
@@ -65,6 +80,36 @@ On first run, you'll be prompted to enter:
 3. Telegram API Hash
 4. Phone number (during authentication)
 5. Your 2FA password (if applicable)
+
+## Input File
+
+The `--input-file` flag allows you to specify a file containing Telegram channels or groups to search. The tool supports various input formats:
+
+### Telegram Links
+The tool will automatically detect and parse t.me links in any of these formats:
+- `https://t.me/channelname`
+- `https://t.me/c/1234567890`
+- `https://t.me/s/channelname`
+- `t.me/channelname`
+- `t.me/c/1234567890`
+- `t.me/s/channelname`
+
+### Channel IDs and Usernames
+If no t.me links are found, each line in the file will be treated as either:
+- A numeric channel ID (e.g., `1234567890`)
+- A channel username (e.g., `channelname`)
+
+### Example Input File
+```text
+# Comments are supported
+https://t.me/channel1
+t.me/c/1234567890
+t.me/s/channel2
+channel3
+1234567890
+```
+
+Note: The tool will attempt to resolve each entry to a valid Telegram channel or group. Invalid or inaccessible entries will be skipped with a warning message.
 
 ## Technical Details
 

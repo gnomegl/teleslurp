@@ -1,12 +1,16 @@
 package commands
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/gnomegl/teleslurp/internal/config"
 	"github.com/gnomegl/teleslurp/internal/telegram"
@@ -22,6 +26,7 @@ var (
 	noPrompt   bool
 	exportJSON bool
 	exportCSV  bool
+	inputFile  string
 )
 
 func init() {
@@ -43,6 +48,7 @@ func init() {
 	searchCmd.Flags().BoolVar(&noPrompt, "no-prompt", false, "Disable interactive prompts")
 	searchCmd.Flags().BoolVar(&exportJSON, "json", false, "Export results to JSON file")
 	searchCmd.Flags().BoolVar(&exportCSV, "csv", false, "Export results to CSV file")
+	searchCmd.Flags().StringVar(&inputFile, "input-file", "", "Input file containing Telegram channels/groups to search")
 
 	rootCmd.AddCommand(searchCmd)
 }
@@ -88,17 +94,13 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	}
 
 	if !noPrompt {
-		if cfg.APIKey == "" {
-			cfg.APIKey = promptAPIKey()
-		}
-
 		if cfg.TGAPIID == 0 || cfg.TGAPIHash == "" {
 			cfg.TGAPIID, cfg.TGAPIHash = promptTGCredentials()
 		}
 	}
 
-	if cfg.APIKey == "" || cfg.TGAPIID == 0 || cfg.TGAPIHash == "" {
-		return fmt.Errorf("missing required credentials. Use flags or enable prompts")
+	if cfg.TGAPIID == 0 || cfg.TGAPIHash == "" {
+		return fmt.Errorf("missing required Telegram credentials. Use flags or enable prompts")
 	}
 
 	if err := config.Save(cfg); err != nil {
@@ -106,8 +108,6 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	}
 
 	query := args[0]
-
-	// check if query is a numeric id, if not, assume it's a username
 	var searchUser types.User
 	if id, err := strconv.ParseInt(query, 10, 64); err == nil {
 		searchUser = types.User{ID: id}
@@ -115,21 +115,41 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		searchUser = types.User{Username: query}
 	}
 
-	tgScanResp, err := tgscan.SearchUser(cfg.APIKey, query)
-	if err != nil {
-		return fmt.Errorf("error searching user: %w", err)
-	}
-
-	if exportJSON {
-		if err := exportToJSON(tgScanResp, query); err != nil {
-			return fmt.Errorf("error exporting to JSON: %w", err)
+	var groups []types.Group
+	if inputFile != "" {
+		channels, err := readChannelsFromFile(inputFile)
+		if err != nil {
+			return fmt.Errorf("error reading channels from file: %w", err)
 		}
-	} else if exportCSV {
-		if err := exportToCSV(tgScanResp, query); err != nil {
-			return fmt.Errorf("error exporting to CSV: %w", err)
-		}
+		groups = channels
 	} else {
-		printUserInfo(tgScanResp)
+		if cfg.APIKey == "" {
+			if !noPrompt {
+				cfg.APIKey = promptAPIKey()
+			}
+			if cfg.APIKey == "" {
+				return fmt.Errorf("TGScan API key is required when not using input file")
+			}
+		}
+
+		tgScanResp, err := tgscan.SearchUser(cfg.APIKey, query)
+		if err != nil {
+			return fmt.Errorf("error searching user: %w", err)
+		}
+
+		if exportJSON {
+			if err := exportToJSON(tgScanResp, query); err != nil {
+				return fmt.Errorf("error exporting to JSON: %w", err)
+			}
+		} else if exportCSV {
+			if err := exportToCSV(tgScanResp, query); err != nil {
+				return fmt.Errorf("error exporting to CSV: %w", err)
+			}
+		} else {
+			printUserInfo(tgScanResp)
+		}
+
+		groups = tgScanResp.Result.Groups
 	}
 
 	var format telegram.OutputFormat
@@ -142,12 +162,13 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	}
 
 	ctx := context.Background()
-	if err := telegram.RunClient(ctx, cfg, &searchUser, tgScanResp.Result.Groups, format); err != nil {
+	if err := telegram.RunClient(ctx, cfg, &searchUser, groups, format); err != nil {
 		return fmt.Errorf("error running Telegram client: %w", err)
 	}
 
 	return nil
 }
+
 func printUserInfo(tgScanResp *types.TGScanResponse) {
 	fmt.Printf("User Information:\n")
 	fmt.Printf("ID: %d\n", tgScanResp.Result.User.ID)
@@ -287,4 +308,51 @@ func exportGroupsCSV(resp *types.TGScanResponse, username string) error {
 
 	fmt.Printf("Groups exported to CSV file: %s\n", groupsFilename)
 	return nil
+}
+
+func readChannelsFromFile(filename string) ([]types.Group, error) {
+	content, err := os.ReadFile(filename)
+	if err != nil {
+		return nil, fmt.Errorf("error reading file: %w", err)
+	}
+
+	// if the file contains any t.me links, extract those
+	channelRegex := regexp.MustCompile(`(?:https?://)?t\.me/(?:[a-z]/)?([0-9]+|[a-zA-Z0-9_]+)`)
+	if matches := channelRegex.FindAllStringSubmatch(string(content), -1); len(matches) > 0 {
+		channels := make([]types.Group, 0, len(matches))
+		for _, match := range matches {
+			if id, err := strconv.ParseInt(match[1], 10, 64); err == nil {
+				channels = append(channels, types.Group{ID: id})
+			} else {
+				channels = append(channels, types.Group{Username: match[1]})
+			}
+		}
+		return channels, nil
+	}
+
+	// otherwise treat each non empty, non comment line as a channel id or username
+	var channels []types.Group
+	scanner := bufio.NewScanner(bytes.NewReader(content))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		if id, err := strconv.ParseInt(line, 10, 64); err == nil {
+			channels = append(channels, types.Group{ID: id})
+		} else {
+			channels = append(channels, types.Group{Username: line})
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("error scanning file: %w", err)
+	}
+
+	if len(channels) == 0 {
+		return nil, fmt.Errorf("no valid channels found in file")
+	}
+
+	return channels, nil
 }
