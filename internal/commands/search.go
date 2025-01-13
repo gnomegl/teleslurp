@@ -19,13 +19,14 @@ import (
 )
 
 var (
-	apiKey     string
-	apiID      int
-	apiHash    string
-	noPrompt   bool
-	exportJSON bool
-	exportCSV  bool
-	inputFile  string
+	apiKey                string
+	apiID                 int
+	apiHash               string
+	noPrompt              bool
+	exportJSON            bool
+	exportCSV             bool
+	exportChannelMetadata bool
+	inputFile             string
 )
 
 func init() {
@@ -47,6 +48,7 @@ func init() {
 	searchCmd.Flags().BoolVar(&noPrompt, "no-prompt", false, "Disable interactive prompts")
 	searchCmd.Flags().BoolVar(&exportJSON, "json", false, "Export results to JSON file")
 	searchCmd.Flags().BoolVar(&exportCSV, "csv", false, "Export results to CSV file")
+	searchCmd.Flags().BoolVar(&exportChannelMetadata, "metadata", false, "Export channel metadata")
 	searchCmd.Flags().StringVar(&inputFile, "input-file", "", "Input file containing Telegram channels/groups to search")
 
 	rootCmd.AddCommand(searchCmd)
@@ -161,7 +163,7 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	}
 
 	ctx := context.Background()
-	if err := telegram.RunClient(ctx, cfg, &searchUser, groups, format); err != nil {
+	if err := telegram.RunClient(ctx, cfg, &searchUser, groups, format, exportChannelMetadata); err != nil {
 		return fmt.Errorf("error running Telegram client: %w", err)
 	}
 

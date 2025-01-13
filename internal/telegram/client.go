@@ -414,7 +414,7 @@ type ChannelSearchResult struct {
 	FirstMessageDate time.Time
 }
 
-func (c *Client) Run(ctx context.Context, searchUser *types.User, groups []types.Group, format OutputFormat) error {
+func (c *Client) Run(ctx context.Context, searchUser *types.User, groups []types.Group, format OutputFormat, exportMetadata bool) error {
 	if err := c.client.Run(ctx, func(ctx context.Context) error {
 		if err := c.authenticate(ctx); err != nil {
 			return err
@@ -460,6 +460,10 @@ func (c *Client) Run(ctx context.Context, searchUser *types.User, groups []types
 				continue
 			}
 
+			if result == nil {
+				continue
+			}
+
 			if len(result.Messages) > 0 {
 				fmt.Print("\033[1A\033[K")
 				fmt.Printf("Found %d messages in %s\n", len(result.Messages), result.Title)
@@ -479,13 +483,18 @@ func (c *Client) Run(ctx context.Context, searchUser *types.User, groups []types
 			time.Sleep(2 * time.Second)
 		}
 
+		if len(allMessages) == 0 {
+			fmt.Println("No messages found")
+			return nil
+		}
+
 		if err := c.printSummary(allMetadata, allMessages, searchUser); err != nil {
 			return err
 		}
 
-		return c.exportResults(allMessages, allMetadata, searchUser.Username, format)
+		return c.exportResults(allMessages, allMetadata, searchUser.Username, format, exportMetadata)
 	}); err != nil {
-		return fmt.Errorf("client run error: %w", err)
+		return fmt.Errorf("error running client: %w", err)
 	}
 
 	return nil
@@ -548,41 +557,34 @@ func (c *Client) printSummary(metadata []ChannelMetadata, messages []MessageData
 	return nil
 }
 
-func (c *Client) exportResults(messages []MessageData, metadata []ChannelMetadata, username string, format OutputFormat) error {
-	if len(messages) > 0 {
-		switch format {
-		case FormatJSON:
-			if err := exportMessagesToJSON(messages, username); err != nil {
-				fmt.Printf("Warning: Failed to export messages to JSON: %v\n", err)
-			}
-		case FormatCSV:
-			if err := exportMessagesToCSV(messages, username); err != nil {
-				fmt.Printf("Warning: Failed to export messages to CSV: %v\n", err)
-			}
-		default:
-			return fmt.Errorf("unsupported output format: %s", format)
+func (c *Client) exportResults(messages []MessageData, metadata []ChannelMetadata, username string, format OutputFormat, exportMetadata bool) error {
+	switch format {
+	case FormatJSON:
+		if err := exportMessagesToJSON(messages, username); err != nil {
+			fmt.Printf("Warning: Failed to export messages to JSON: %v\n", err)
 		}
-	}
-
-	if len(metadata) > 0 {
-		switch format {
-		case FormatJSON:
+		if exportMetadata {
 			if err := exportChannelMetadataToJSON(metadata, username); err != nil {
 				fmt.Printf("Warning: Failed to export channel metadata to JSON: %v\n", err)
 			}
-		case FormatCSV:
+		}
+	case FormatCSV:
+		if err := exportMessagesToCSV(messages, username); err != nil {
+			fmt.Printf("Warning: Failed to export messages to CSV: %v\n", err)
+		}
+		if exportMetadata {
 			if err := exportChannelMetadataToCSV(metadata, username); err != nil {
 				fmt.Printf("Warning: Failed to export channel metadata to CSV: %v\n", err)
 			}
-		default:
-			return fmt.Errorf("unsupported output format: %s", format)
 		}
+	default:
+		return fmt.Errorf("unsupported output format: %s", format)
 	}
 
 	return nil
 }
 
-func RunClient(ctx context.Context, cfg *config.Config, searchUser *types.User, groups []types.Group, format OutputFormat) error {
+func RunClient(ctx context.Context, cfg *config.Config, searchUser *types.User, groups []types.Group, format OutputFormat, exportMetadata bool) error {
 	client := NewClient(cfg)
-	return client.Run(ctx, searchUser, groups, format)
+	return client.Run(ctx, searchUser, groups, format, exportMetadata)
 }
