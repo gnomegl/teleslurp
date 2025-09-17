@@ -136,22 +136,30 @@ func runSearch(cmd *cobra.Command, args []string, apiKey string, apiID int, apiH
 
 		tgScanResp, err := tgscan.SearchUser(cfg.APIKey, query)
 		if err != nil {
-			return fmt.Errorf("error searching user: %w", err)
-		}
-
-		if exportJSON {
-			if err := exportToJSON(tgScanResp, query); err != nil {
-				return fmt.Errorf("error exporting to JSON: %w", err)
-			}
-		} else if exportCSV {
-			if err := exportToCSV(tgScanResp, query); err != nil {
-				return fmt.Errorf("error exporting to CSV: %w", err)
+			// Check if it's a "user not found" error from TGScan
+			if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "No user") {
+				fmt.Printf("❌ User '%s' not found in TGScan database\n", query)
+				// Return nil instead of error to avoid printing usage
+				return nil
+			} else {
+				return fmt.Errorf("error searching user: %w", err)
 			}
 		} else {
-			printUserInfo(tgScanResp)
-		}
+			// User found in TGScan
+			if exportJSON {
+				if err := exportToJSON(tgScanResp, query); err != nil {
+					return fmt.Errorf("error exporting to JSON: %w", err)
+				}
+			} else if exportCSV {
+				if err := exportToCSV(tgScanResp, query); err != nil {
+					return fmt.Errorf("error exporting to CSV: %w", err)
+				}
+			} else {
+				printUserInfo(tgScanResp)
+			}
 
-		groups = tgScanResp.Result.Groups
+			groups = tgScanResp.Result.Groups
+		}
 	}
 
 	var format telegram.OutputFormat
@@ -172,35 +180,45 @@ func runSearch(cmd *cobra.Command, args []string, apiKey string, apiID int, apiH
 }
 
 func printUserInfo(tgScanResp *types.TGScanResponse) {
-	fmt.Printf("User Information:\n")
-	fmt.Printf("ID: %d\n", tgScanResp.Result.User.ID)
-	fmt.Printf("Username: %s\n", tgScanResp.Result.User.Username)
-	fmt.Printf("First Name: %s\n", tgScanResp.Result.User.FirstName)
-	fmt.Printf("Last Name: %s\n", tgScanResp.Result.User.LastName)
-
-	fmt.Println("\nUsername History:")
-	for _, history := range tgScanResp.Result.UsernameHistory {
-		fmt.Printf("  - Username: %s (Changed on: %s)\n", history.Username, history.Date)
+	// Check if user was found
+	if tgScanResp.Result.User.ID == 0 && tgScanResp.Result.User.Username == "" {
+		fmt.Printf("❌ User not found in TGScan database\n")
+		return
 	}
 
-	fmt.Println("\nID History:")
-	for _, history := range tgScanResp.Result.IDHistory {
-		fmt.Printf("  - ID: %d (Changed on: %s)\n", history.ID, history.Date)
+	// User header
+	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+	fmt.Printf("USER: @%s (ID: %d)\n", tgScanResp.Result.User.Username, tgScanResp.Result.User.ID)
+	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+
+	// Basic info
+	if tgScanResp.Result.User.FirstName != "" || tgScanResp.Result.User.LastName != "" {
+		fmt.Printf("Name: %s %s\n", tgScanResp.Result.User.FirstName, tgScanResp.Result.User.LastName)
 	}
 
-	fmt.Println("\nMeta Information:")
-	fmt.Printf("Search Query: %s\n", tgScanResp.Result.Meta.SearchQuery)
-	fmt.Printf("Known Number of Groups: %d\n", tgScanResp.Result.Meta.KnownNumGroups)
-	fmt.Printf("Number of Groups: %d\n", tgScanResp.Result.Meta.NumGroups)
-	fmt.Printf("Operation Cost: %d\n", tgScanResp.Result.Meta.OpCost)
-
-	fmt.Println("\nGroups:")
-	for _, group := range tgScanResp.Result.Groups {
-		fmt.Printf("  - Group Name: %s\n", group.Title)
-		fmt.Printf("    Username: %s\n", group.Username)
-		fmt.Printf("    Date Updated: %s\n", group.DateUpdated)
+	// Username history
+	if len(tgScanResp.Result.UsernameHistory) > 0 {
+		fmt.Printf("\nPrevious Usernames (%d):\n", len(tgScanResp.Result.UsernameHistory))
+		for _, history := range tgScanResp.Result.UsernameHistory {
+			fmt.Printf("  • @%s (%s)\n", history.Username, history.Date)
+		}
 	}
-	fmt.Println("")
+
+	// Groups
+	if tgScanResp.Result.Meta.NumGroups > 0 {
+		fmt.Printf("\nGroups (%d found):\n", tgScanResp.Result.Meta.NumGroups)
+		for _, group := range tgScanResp.Result.Groups {
+			fmt.Printf("  • %s (@%s)\n", group.Title, group.Username)
+		}
+	} else {
+		fmt.Printf("\nGroups: None found\n")
+	}
+
+	// Meta stats
+	if tgScanResp.Result.Meta.OpCost > 0 {
+		fmt.Printf("\nSearch Cost: %d credits\n", tgScanResp.Result.Meta.OpCost)
+	}
+	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 }
 
 func exportToJSON(resp *types.TGScanResponse, username string) error {

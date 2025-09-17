@@ -38,5 +38,10 @@ func SearchUser(apiKey, query string) (*types.TGScanResponse, error) {
 		return nil, fmt.Errorf("error parsing response: %w", err)
 	}
 
+	// Check if user was actually found
+	if tgScanResp.Result.User.ID == 0 && tgScanResp.Result.User.Username == "" {
+		return &tgScanResp, fmt.Errorf("user not found")
+	}
+
 	return &tgScanResp, nil
 }

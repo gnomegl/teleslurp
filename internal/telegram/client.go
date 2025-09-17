@@ -83,7 +83,6 @@ func exportMessagesToCSV(messages []MessageData, username string) error {
 		}
 	}
 
-	fmt.Printf("Messages exported to CSV file: %s\n", filename)
 	return nil
 }
 
@@ -126,7 +125,6 @@ func exportChannelMetadataToCSV(metadata []ChannelMetadata, username string) err
 		}
 	}
 
-	fmt.Printf("Channel metadata exported to CSV file: %s\n", filename)
 	return nil
 }
 
@@ -581,7 +579,25 @@ func (c *Client) Run(ctx context.Context, searchUser *types.User, groups []types
 		c.api = c.client.API()
 		userID, userAccessHash, err := c.resolveUser(ctx, searchUser)
 		if err != nil {
-			return err
+			// Check if user was found in TGScan but not on Telegram
+			if strings.Contains(err.Error(), "USERNAME_NOT_OCCUPIED") || strings.Contains(err.Error(), "not found") {
+				if searchUser.Username != "" {
+					fmt.Printf("\nWARNING: User @%s was found in TGScan database but no longer exists on Telegram\n", searchUser.Username)
+					fmt.Printf("This account may have been deleted or the username changed.\n")
+					if searchUser.ID != 0 {
+						fmt.Printf("Attempting to search by user ID %d instead...\n", searchUser.ID)
+						// Try searching by ID if we have it
+						userID = searchUser.ID
+						userAccessHash = searchUser.ID // Use ID as fallback for access hash
+					} else {
+						return fmt.Errorf("user not found on Telegram")
+					}
+				} else {
+					return fmt.Errorf("user ID %d not found on Telegram", searchUser.ID)
+				}
+			} else {
+				return err
+			}
 		}
 
 		if searchUser.ID != 0 && searchUser.Username == "" {
@@ -591,45 +607,45 @@ func (c *Client) Run(ctx context.Context, searchUser *types.User, groups []types
 				if resolvedAccessHash != 0 {
 					userAccessHash = resolvedAccessHash
 				}
-				fmt.Printf("Resolved username for ID %d: @%s\n", userID, resolvedUsername)
+				fmt.Printf("✓ Resolved username for ID %d: @%s\n", userID, resolvedUsername)
 			}
 		}
 
-		fmt.Printf("Searching messages for user ID: %d\n", userID)
+		fmt.Printf("\nSearching %d groups for user ID %d...\n", len(groups), userID)
 
 		var allMessages []MessageData
 		var allMetadata []ChannelMetadata
 
 		bar := progressbar.NewOptions(len(groups),
-			progressbar.OptionSetDescription("Searching channels"),
-			progressbar.OptionSetWidth(30),
+			progressbar.OptionSetDescription("Progress"),
+			progressbar.OptionSetWidth(40),
 			progressbar.OptionShowCount(),
 			progressbar.OptionSetPredictTime(false),
-			progressbar.OptionSetElapsedTime(true),
+			progressbar.OptionSetElapsedTime(false),
 			progressbar.OptionSetRenderBlankState(true),
 			progressbar.OptionThrottle(100*time.Millisecond),
 			progressbar.OptionUseANSICodes(true),
 			progressbar.OptionEnableColorCodes(true),
 			progressbar.OptionSetTheme(progressbar.Theme{
-				Saucer:        "━",
-				SaucerHead:    "▶",
-				SaucerPadding: "─",
+				Saucer:        "█",
+				SaucerHead:    "█",
+				SaucerPadding: "░",
 				BarStart:      "[",
 				BarEnd:        "]",
 			}),
 		)
 
-		for groupIdx, group := range groups {
-			fmt.Print("\033[1A\033[K")
-			fmt.Printf("[%d/%d] Checking %s...\n", groupIdx+1, len(groups), group.Title)
+		for _, group := range groups {
+			groupName := group.Title
+			if groupName == "" {
+				groupName = group.Username
+			}
 
 			result, err := c.searchChannel(ctx, group, userID, userAccessHash, searchUser)
 			if err != nil {
-				// More detailed error message
+				// Silent skip for inaccessible channels
 				if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "USERNAME") {
-					fmt.Printf("Channel %s not accessible (private/renamed/deleted)\n", group.Title)
-				} else {
-					fmt.Printf("Error searching channel: %v\n", err)
+					// Skip silently
 				}
 				continue
 			}
@@ -639,8 +655,6 @@ func (c *Client) Run(ctx context.Context, searchUser *types.User, groups []types
 			}
 
 			if len(result.Messages) > 0 {
-				fmt.Print("\033[1A\033[K")
-				fmt.Printf("Found %d messages in %s\n", len(result.Messages), result.Title)
 
 				for i := range result.Messages {
 					result.Messages[i].ChannelTitle = result.Title
@@ -680,26 +694,19 @@ func (c *Client) Run(ctx context.Context, searchUser *types.User, groups []types
 }
 
 func (c *Client) printSummary(metadata []ChannelMetadata, messages []MessageData, searchUser *types.User) error {
-	fmt.Printf("\n\nSummary of channels with messages:\n")
-	fmt.Printf("================================\n")
+	if len(metadata) == 0 {
+		fmt.Printf("\n❌ No messages found in any channels.\n")
+		return nil
+	}
+
+	fmt.Printf("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+	fmt.Printf("RESULTS SUMMARY\n")
+	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 
 	var totalMessages int
 	var totalMembers int
+
 	for _, meta := range metadata {
-		isAdmin := false
-		adminList := strings.Split(meta.ChannelAdmins, ", ")
-		for _, admin := range adminList {
-			if admin == searchUser.Username {
-				isAdmin = true
-				break
-			}
-		}
-
-		channelInfo := fmt.Sprintf("%s (@%s)", meta.ChannelTitle, meta.ChannelUsername)
-		if meta.ChannelUsername == "" {
-			channelInfo = fmt.Sprintf("%s (%s)", meta.ChannelTitle, meta.ChannelLink)
-		}
-
 		messageCount := 0
 		for _, msg := range messages {
 			if msg.ChannelUsername == meta.ChannelUsername || (meta.ChannelUsername == "" && msg.ChannelTitle == meta.ChannelTitle) {
@@ -709,51 +716,69 @@ func (c *Client) printSummary(metadata []ChannelMetadata, messages []MessageData
 		totalMessages += messageCount
 		totalMembers += meta.MemberCount
 
-		if isAdmin {
-			fmt.Printf("\033[31m%s\n", channelInfo)
-			fmt.Printf("  • Admin Status: Yes\033[0m\n")
-		} else {
-			fmt.Printf("%s\n", channelInfo)
+		// Check if user is admin
+		isAdmin := false
+		adminList := strings.Split(meta.ChannelAdmins, ", ")
+		for _, admin := range adminList {
+			if admin == searchUser.Username {
+				isAdmin = true
+				break
+			}
 		}
-		fmt.Printf("  • Messages: %d\n", messageCount)
-		fmt.Printf("  • Members: %d\n", meta.MemberCount)
-		fmt.Printf("  • First message: %s\n", meta.UserFirstMessage)
-		fmt.Printf("  • Link: %s\n\n", meta.ChannelLink)
+
+		// Format channel name
+		channelName := meta.ChannelTitle
+		if meta.ChannelUsername != "" {
+			channelName = fmt.Sprintf("%s (@%s)", meta.ChannelTitle, meta.ChannelUsername)
+		}
+
+		// Print channel info with admin indicator
+		if isAdmin {
+			fmt.Printf("\n👑 %s [ADMIN]\n", channelName)
+		} else {
+			fmt.Printf("\n📌 %s\n", channelName)
+		}
+
+		fmt.Printf("  Messages: %d | Members: %d\n", messageCount, meta.MemberCount)
+		if meta.UserFirstMessage != "" && meta.UserFirstMessage != "0001-01-01 00:00:00" {
+			fmt.Printf("  First seen: %s\n", meta.UserFirstMessage)
+		}
 	}
 
-	if len(metadata) > 0 {
-		fmt.Printf("Total Statistics:\n")
-		fmt.Printf("================\n")
-		fmt.Printf("Channels with messages: %d\n", len(metadata))
-		fmt.Printf("Total messages found: %d\n", totalMessages)
-		fmt.Printf("Total members in channels: %d\n", totalMembers)
-		avgMessagesPerChannel := float64(totalMessages) / float64(len(metadata))
-		fmt.Printf("Average messages per channel: %.1f\n", avgMessagesPerChannel)
-	} else {
-		fmt.Printf("\nNo messages found in any channels.\n")
-	}
+	// Print totals
+	fmt.Printf("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+	fmt.Printf("TOTALS\n")
+	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+	fmt.Printf("Channels: %d | Messages: %d | Total Members: %d\n", len(metadata), totalMessages, totalMembers)
 
 	return nil
 }
 
 func (c *Client) exportResults(messages []MessageData, metadata []ChannelMetadata, username string, format OutputFormat, exportMetadata bool) error {
+	fmt.Printf("\nExporting data...\n")
+
 	switch format {
 	case FormatJSON:
+		filename := export.FormatFilename(username, "messages", "json")
 		if err := exportMessagesToJSON(messages, username); err != nil {
-			fmt.Printf("Warning: Failed to export messages to JSON: %v\n", err)
+			return fmt.Errorf("failed to export messages: %v", err)
 		}
+		fmt.Printf("✓ Messages exported to: %s\n", filename)
+
 		if exportMetadata {
+			metaFilename := export.FormatFilename(username, "channel_metadata", "json")
 			if err := exportChannelMetadataToJSON(metadata, username); err != nil {
-				fmt.Printf("Warning: Failed to export channel metadata to JSON: %v\n", err)
+				return fmt.Errorf("failed to export metadata: %v", err)
 			}
+			fmt.Printf("✓ Metadata exported to: %s\n", metaFilename)
 		}
 	case FormatCSV:
 		if err := exportMessagesToCSV(messages, username); err != nil {
-			fmt.Printf("Warning: Failed to export messages to CSV: %v\n", err)
+			return fmt.Errorf("failed to export messages: %v", err)
 		}
 		if exportMetadata {
 			if err := exportChannelMetadataToCSV(metadata, username); err != nil {
-				fmt.Printf("Warning: Failed to export channel metadata to CSV: %v\n", err)
+				return fmt.Errorf("failed to export metadata: %v", err)
 			}
 		}
 	default:
