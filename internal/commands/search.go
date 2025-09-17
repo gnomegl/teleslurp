@@ -26,12 +26,21 @@ var (
 )
 
 func init() {
+	var (
+		apiKey   string
+		apiID    int
+		apiHash  string
+		noPrompt bool
+	)
+
 	searchCmd := &cobra.Command{
 		Use:   "search [username]",
 		Short: "Search for a Telegram user",
 		Long:  `Search for a Telegram user and display their information`,
 		Args:  cobra.ExactArgs(1),
-		RunE:  runSearch,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runSearch(cmd, args, apiKey, apiID, apiHash, noPrompt)
+		},
 	}
 
 	searchCmd.Flags().StringVar(&apiKey, "api-key", "", "TGScan API key")
@@ -66,7 +75,7 @@ func promptTGCredentials() (int, string) {
 	return apiID, apiHash
 }
 
-func runSearch(cmd *cobra.Command, args []string) error {
+func runSearch(cmd *cobra.Command, args []string, apiKey string, apiID int, apiHash string, noPrompt bool) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("error loading config: %w", err)

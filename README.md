@@ -58,6 +58,79 @@ Note: When using `--csv` or `--json`, two files will be created:
 - `username_messages.[csv|json]` - Contains all messages found
 - `username_channel_metadata.[csv|json]` - Contains detailed information about each channel
 
+### Monitor Command
+```bash
+teleslurp monitor [flags]
+```
+
+Monitor Telegram channels and groups in real-time, forwarding messages to target channels. This command runs continuously and requires a configuration file.
+
+#### Configuration
+Create a `monitor.config.yaml` file in your config directory (`~/.config/teleslurp/` on Linux/macOS or `%APPDATA%\Local\teleslurp\` on Windows):
+
+```yaml
+# Source channels to monitor
+source_channels:
+  # Use numeric IDs (recommended)
+  - id: 1234567890
+  - id: 9876543210
+  # Username support planned (not implemented yet)
+  # - username: "@example_channel"
+
+# Source groups to monitor
+source_groups:
+  # Use numeric IDs (recommended)
+  - id: 1111111111
+  - id: 2222222222
+  # Username support planned (not implemented yet)
+  # - username: "@example_group"
+
+# Target channels to forward messages to
+target_channels:
+  # Use numeric IDs (recommended)
+  - id: 5555555555
+  # Username support planned (not implemented yet)
+  # - username: "@target_channel"
+
+# User monitoring (planned feature, not implemented yet)
+# monitor_users:
+#   - id: 666666666
+#   - username: "@user_to_monitor"
+```
+
+#### Features
+- **Real-time monitoring**: Continuously monitors specified channels/groups for new messages
+- **Automatic forwarding**: Forwards messages to target channels with attribution
+- **Database storage**: Saves all forwarded messages to a local SQLite database
+- **Media support**: Handles text, photos, and documents (with content protection awareness)
+- **Graceful shutdown**: Handles SIGINT/SIGTERM for clean shutdown
+
+#### Planned Features
+- **Username support**: Monitor channels/groups using @usernames instead of numeric IDs
+- **User status monitoring**: Track online/offline status and other user state changes
+- **Advanced filtering**: Filter messages based on content, sender, or other criteria
+- **Multi-target forwarding**: Forward to multiple target channels simultaneously
+
+#### Flags
+- `--api-hash string`   Telegram API Hash (optional if already set in config)
+- `--api-id int`        Telegram API ID (optional if already set in config)
+- `--api-key string`    TGScan API key (optional if already set in config)
+- `--config string`     Path to monitor configuration file (default: config directory)
+- `--no-prompt`         Disable interactive prompts
+- `-h, --help`          Help for monitor command
+
+#### Database
+The monitor command automatically creates and maintains a SQLite database (`teleslurp.db`) in the same directory as your session files. This database stores:
+- All forwarded messages with full metadata
+- Channel information and member counts
+- Message timestamps and URLs
+- Unique constraints to prevent duplicates
+
+**Future database features:**
+- User status change history
+- Advanced message filtering and search
+- Monitoring statistics and analytics
+
 ### Completion Command
 ```bash
 teleslurp completion [shell]

@@ -7,7 +7,9 @@ import (
 	"time"
 
 	"github.com/gnomegl/teleslurp/internal/config"
+	"github.com/gnomegl/teleslurp/internal/database"
 	"github.com/gnomegl/teleslurp/internal/export"
+	"github.com/gnomegl/teleslurp/internal/filter"
 	"github.com/gnomegl/teleslurp/internal/types"
 	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
@@ -196,13 +198,15 @@ func (c *Client) authenticate(ctx context.Context) error {
 
 func (c *Client) resolveUser(ctx context.Context, searchUser *types.User) (int64, int64, error) {
 	if searchUser.Username != "" {
-		resolvedUser, err := c.api.ContactsResolveUsername(ctx, searchUser.Username)
+		cleanUsername := strings.TrimPrefix(searchUser.Username, "@")
+
+		resolvedUser, err := c.api.ContactsResolveUsername(ctx, cleanUsername)
 		if err != nil {
 			return 0, 0, fmt.Errorf("error resolving username: %w", err)
 		}
 
 		for _, u := range resolvedUser.Users {
-			if tgUser, ok := u.(*tg.User); ok && tgUser.Username == searchUser.Username {
+			if tgUser, ok := u.(*tg.User); ok && tgUser.Username == cleanUsername {
 				searchUser.ID = tgUser.ID
 				searchUser.Username = tgUser.Username
 				return tgUser.ID, tgUser.AccessHash, nil
@@ -213,6 +217,54 @@ func (c *Client) resolveUser(ctx context.Context, searchUser *types.User) (int64
 
 	// For ID-based searches, we'll try to resolve username from group participants later
 	return searchUser.ID, searchUser.ID, nil
+}
+
+// ResolveChannelUsername resolves a channel/group username to its ID and access hash
+func (c *Client) ResolveChannelUsername(ctx context.Context, username string) (int64, int64, string, error) {
+	cleanUsername := strings.TrimPrefix(username, "@")
+
+	resolvedPeer, err := c.api.ContactsResolveUsername(ctx, cleanUsername)
+	if err != nil {
+		if strings.Contains(err.Error(), "USERNAME_NOT_OCCUPIED") || strings.Contains(err.Error(), "USERNAME_INVALID") {
+			return 0, 0, "", fmt.Errorf("channel/group %s not found (may be private or renamed)", cleanUsername)
+		}
+		return 0, 0, "", fmt.Errorf("could not resolve %s: %w", cleanUsername, err)
+	}
+
+	// Check for channels
+	for _, chat := range resolvedPeer.Chats {
+		if ch, ok := chat.(*tg.Channel); ok && ch.Username == cleanUsername {
+			return ch.ID, ch.AccessHash, ch.Title, nil
+		}
+	}
+
+	// Check for regular chats/groups
+	for _, chat := range resolvedPeer.Chats {
+		if ch, ok := chat.(*tg.Chat); ok {
+			return ch.ID, 0, ch.Title, nil
+		}
+	}
+
+	return 0, 0, "", fmt.Errorf("could not find channel/group with username: %s", cleanUsername)
+}
+
+// ResolveUserUsername resolves a user's username to their ID and access hash
+func (c *Client) ResolveUserUsername(ctx context.Context, username string) (int64, int64, string, string, error) {
+	cleanUsername := strings.TrimPrefix(username, "@")
+
+	resolvedUser, err := c.api.ContactsResolveUsername(ctx, cleanUsername)
+	if err != nil {
+		return 0, 0, "", "", fmt.Errorf("error resolving username %s: %w", cleanUsername, err)
+	}
+
+	for _, u := range resolvedUser.Users {
+		if tgUser, ok := u.(*tg.User); ok && tgUser.Username == cleanUsername {
+			fullName := strings.TrimSpace(fmt.Sprintf("%s %s", tgUser.FirstName, tgUser.LastName))
+			return tgUser.ID, tgUser.AccessHash, tgUser.Username, fullName, nil
+		}
+	}
+
+	return 0, 0, "", "", fmt.Errorf("could not find user with username: %s", cleanUsername)
 }
 
 func (c *Client) tryResolveUsernameFromGroups(ctx context.Context, userID int64, groups []types.Group) (string, int64) {
@@ -243,7 +295,6 @@ func (c *Client) tryResolveUsernameFromGroups(ctx context.Context, userID int64,
 			continue
 		}
 
-		// Try to get participants to find the user
 		participants, err := c.api.ChannelsGetParticipants(ctx, &tg.ChannelsGetParticipantsRequest{
 			Channel: &tg.InputChannel{
 				ChannelID:  channelID,
@@ -1031,13 +1082,46 @@ func (c *Client) MonitorChannels(ctx context.Context, channelIDs []int64, handle
 	})
 }
 
-func (c *Client) MonitorAndForward(ctx context.Context, sourceChannelIDs []int64, targetChannelID int64) error {
-	fmt.Printf("Starting MonitorAndForward with source channels: %v, target: %d\n", sourceChannelIDs, targetChannelID)
+// RunWithContext runs the client with a provided context and function
+func (c *Client) RunWithContext(ctx context.Context, f func(context.Context) error) error {
+	return c.client.Run(ctx, func(ctx context.Context) error {
+		if err := c.authenticate(ctx); err != nil {
+			return err
+		}
+		c.api = c.client.API()
+		return f(ctx)
+	})
+}
+
+func (c *Client) MonitorAndForward(ctx context.Context, sourceChannelIDs []int64, targetChannelID int64, db *database.DB) error {
+	return c.MonitorAndForwardWithUsers(ctx, sourceChannelIDs, targetChannelID, nil, db)
+}
+
+// MonitorAndForwardWithUsers monitors channels and user status changes
+func (c *Client) MonitorAndForwardWithUsers(ctx context.Context, sourceChannelIDs []int64, targetChannelID int64, monitorUserIDs []int64, db *database.DB) error {
+	fmt.Printf("Starting MonitorAndForward with source channels: %v, target: %d, monitoring users: %v\n", sourceChannelIDs, targetChannelID, monitorUserIDs)
 
 	// Create a map of channel IDs for quick lookup
 	channels := make(map[int64]bool)
 	for _, id := range sourceChannelIDs {
 		channels[id] = true
+	}
+
+	// Create a map of user IDs to monitor
+	monitorUsers := make(map[int64]bool)
+	for _, id := range monitorUserIDs {
+		monitorUsers[id] = true
+	}
+
+	// Initialize filter manager
+	var filterManager *filter.FilterManager
+	if db != nil {
+		filterManager = filter.NewFilterManager(db)
+		if err := filterManager.LoadFilters(); err != nil {
+			fmt.Printf("Warning: Failed to load message filters: %v\n", err)
+		} else {
+			fmt.Println("Loaded message filters")
+		}
 	}
 
 	// Create a dispatcher and register handlers
@@ -1068,6 +1152,28 @@ func (c *Client) MonitorAndForward(ctx context.Context, sourceChannelIDs []int64
 		}
 		fmt.Printf("Message is from monitored channel: %d\n", channelID)
 
+		// Apply message filters if available
+		if filterManager != nil {
+			// Get the user ID from the message (if available)
+			var senderUserID int64
+			if msg.FromID != nil {
+				if peerUser, ok := msg.FromID.(*tg.PeerUser); ok {
+					senderUserID = peerUser.UserID
+				}
+			}
+
+			// Check if message should be processed based on filters
+			shouldProcess, action := filterManager.ProcessMessage(msg.Message, channelID, senderUserID)
+			if !shouldProcess {
+				fmt.Printf("Message filtered out (action: %s)\n", action)
+				return nil
+			}
+			if action == "highlight" {
+				// Prepend highlight emoji to message
+				msg.Message = "⚡ " + msg.Message
+				fmt.Println("Message marked as highlighted")
+			}
+		}
 		// Get channel info
 		fmt.Printf("Getting channel info for: %d\n", channelID)
 		channel, err := c.api.ChannelsGetFullChannel(ctx, &tg.InputChannel{
@@ -1112,6 +1218,12 @@ func (c *Client) MonitorAndForward(ctx context.Context, sourceChannelIDs []int64
 			AccessHash: 0,
 		}
 		fmt.Printf("Created target peer for channel: %d\n", targetChannelID)
+
+		// Save message to database
+		messageURL := formatMessageURL(channelID, msg.ID, channelInfo.(*tg.Channel).Username)
+		if err := db.SaveMessage(channelID, channelTitle, channelInfo.(*tg.Channel).Username, msg.ID, time.Unix(int64(msg.Date), 0).Format("2006-01-02 15:04:05"), msg.Message, messageURL); err != nil {
+			fmt.Printf("Warning: Failed to save message to database: %v\n", err)
+		}
 
 		// Handle media
 		if msg.Media != nil {
@@ -1248,7 +1360,149 @@ func (c *Client) MonitorAndForward(ctx context.Context, sourceChannelIDs []int64
 		return nil
 	})
 
-	fmt.Println("Registered message handler")
+	// Register handler for user status updates (if monitoring users)
+	if len(monitorUsers) > 0 {
+		dispatcher.OnUserStatus(func(ctx context.Context, e tg.Entities, update *tg.UpdateUserStatus) error {
+			// Only process if this user is being monitored
+			if !monitorUsers[update.UserID] {
+				return nil
+			}
+
+			fmt.Printf("User status update - UserID: %d\n", update.UserID)
+
+			// Get user info
+			users, err := c.api.UsersGetUsers(ctx, []tg.InputUserClass{
+				&tg.InputUser{
+					UserID:     update.UserID,
+					AccessHash: 0,
+				},
+			})
+			if err != nil {
+				fmt.Printf("Error getting user info: %v\n", err)
+				return nil
+			}
+
+			if len(users) > 0 {
+				if user, ok := users[0].(*tg.User); ok {
+					var statusText string
+					switch status := update.Status.(type) {
+					case *tg.UserStatusOnline:
+						statusText = fmt.Sprintf("online (expires: %v)", time.Unix(int64(status.Expires), 0))
+					case *tg.UserStatusOffline:
+						statusText = fmt.Sprintf("offline (was online: %v)", time.Unix(int64(status.WasOnline), 0))
+					case *tg.UserStatusRecently:
+						statusText = "recently active"
+					case *tg.UserStatusLastWeek:
+						statusText = "last seen within a week"
+					case *tg.UserStatusLastMonth:
+						statusText = "last seen within a month"
+					default:
+						statusText = fmt.Sprintf("unknown status: %T", status)
+					}
+
+					message := fmt.Sprintf("👤 User Status Update\nUser: %s %s (@%s)\nStatus: %s",
+						user.FirstName, user.LastName, user.Username, statusText)
+
+					// Send notification to target channel
+					_, err = c.api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+						Peer: &tg.InputPeerChannel{
+							ChannelID:  targetChannelID,
+							AccessHash: 0,
+						},
+						Message:  message,
+						RandomID: rand.Int63(),
+					})
+					if err != nil {
+						fmt.Printf("Error sending user status update: %v\n", err)
+					}
+
+					// Save to database
+					if db != nil {
+						statusTime := time.Now().Format("2006-01-02 15:04:05")
+						if err := db.SaveUserStatusUpdate(update.UserID, user.Username, user.FirstName, user.LastName, statusText, statusTime); err != nil {
+							fmt.Printf("Warning: Failed to save user status to database: %v\n", err)
+						}
+					}
+				}
+			}
+
+			return nil
+		})
+		fmt.Println("Registered user status handler")
+	}
+
+	fmt.Println("Registered message handlers")
+	if len(monitorUsers) > 0 {
+		dispatcher.OnUserStatus(func(ctx context.Context, e tg.Entities, update *tg.UpdateUserStatus) error {
+			// Only process if this user is being monitored
+			if !monitorUsers[update.UserID] {
+				return nil
+			}
+
+			fmt.Printf("User status update - UserID: %d\n", update.UserID)
+
+			// Get user info
+			users, err := c.api.UsersGetUsers(ctx, []tg.InputUserClass{
+				&tg.InputUser{
+					UserID:     update.UserID,
+					AccessHash: 0,
+				},
+			})
+			if err != nil {
+				fmt.Printf("Error getting user info: %v\n", err)
+				return nil
+			}
+
+			if len(users) > 0 {
+				if user, ok := users[0].(*tg.User); ok {
+					var statusText string
+					switch status := update.Status.(type) {
+					case *tg.UserStatusOnline:
+						statusText = fmt.Sprintf("online (expires: %v)", time.Unix(int64(status.Expires), 0))
+					case *tg.UserStatusOffline:
+						statusText = fmt.Sprintf("offline (was online: %v)", time.Unix(int64(status.WasOnline), 0))
+					case *tg.UserStatusRecently:
+						statusText = "recently active"
+					case *tg.UserStatusLastWeek:
+						statusText = "last seen within a week"
+					case *tg.UserStatusLastMonth:
+						statusText = "last seen within a month"
+					default:
+						statusText = fmt.Sprintf("unknown status: %T", status)
+					}
+
+					message := fmt.Sprintf("👤 User Status Update\nUser: %s %s (@%s)\nStatus: %s",
+						user.FirstName, user.LastName, user.Username, statusText)
+
+					// Send notification to target channel
+					_, err = c.api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+						Peer: &tg.InputPeerChannel{
+							ChannelID:  targetChannelID,
+							AccessHash: 0,
+						},
+						Message:  message,
+						RandomID: rand.Int63(),
+					})
+					if err != nil {
+						fmt.Printf("Error sending user status update: %v\n", err)
+					}
+
+					// Save to database
+					if db != nil {
+						statusTime := time.Now().Format("2006-01-02 15:04:05")
+						if err := db.SaveUserStatusUpdate(update.UserID, user.Username, user.FirstName, user.LastName, statusText, statusTime); err != nil {
+							fmt.Printf("Warning: Failed to save user status to database: %v\n", err)
+						}
+					}
+				}
+			}
+
+			return nil
+		})
+		fmt.Println("Registered user status handler")
+	}
+
+	fmt.Println("Registered message handlers")
 
 	// Now authenticate
 	if err := c.authenticate(ctx); err != nil {
@@ -1256,7 +1510,6 @@ func (c *Client) MonitorAndForward(ctx context.Context, sourceChannelIDs []int64
 	}
 	fmt.Println("Successfully authenticated")
 
-	// Start receiving updates
 	fmt.Println("Starting update loop...")
 
 	// Get initial channel states

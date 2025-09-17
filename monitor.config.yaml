@@ -1,0 +1,48 @@
+# Teleslurp Monitor Configuration
+# This file controls which Telegram channels/groups to monitor and where to forward messages
+
+# Source channels to monitor
+source_channels:
+  # Option 1: Use numeric IDs (recommended for reliability)
+  - id: 1234567890
+
+  # Option 2: Use usernames (now supported!)
+  # - username: "@example_channel"
+  # - username: "example_channel"
+
+# Source groups to monitor
+source_groups:
+  # Option 1: Use numeric IDs
+  - id: 1111111111
+
+  # Option 2: Use usernames (now supported!)
+  # - username: "@example_group"
+
+# Target channels to forward messages to
+target_channels:
+  # Option 1: Use numeric IDs
+  - id: 5555555555
+  
+  # Option 2: Use usernames (now supported!)
+  # - username: "@target_channel"
+
+# Users to monitor for status changes (now implemented!)
+monitor_users:
+  # - id: 666666666
+  # - username: "@user_to_monitor"
+
+# Notes:
+# - You can monitor both channels and groups
+# - Messages will be forwarded to all target channels
+# - IDs should be numeric (without the -100 prefix for channels/groups)
+# - Username resolution is now supported for channels, groups, and users
+# - User status monitoring is now implemented - get notified when users go online/offline
+# - Advanced filtering is available via database configuration
+# - Make sure your bot/user has access to read from source channels/groups
+# - Make sure your bot/user has permission to send to target channels
+
+# Advanced Features:
+# - Message Filtering: Configure keyword, regex, user, and channel filters in the database
+# - User Status Tracking: Monitor when specific users come online or go offline  
+# - Channel Metadata: Automatically track channel member counts and metadata
+# - Message History: All forwarded messages are saved to the database for later analysis
