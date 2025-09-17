@@ -41,7 +41,6 @@ func NewCSVWriter(filename string) (*CSVWriter, error) {
 	}, nil
 }
 
-// WriteHeader writes the CSV headers
 func (w *CSVWriter) WriteHeader(headers []string) error {
 	if err := w.writer.Write(headers); err != nil {
 		return fmt.Errorf("error writing CSV headers: %w", err)

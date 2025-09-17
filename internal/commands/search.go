@@ -19,10 +19,6 @@ import (
 )
 
 var (
-	apiKey                string
-	apiID                 int
-	apiHash               string
-	noPrompt              bool
 	exportJSON            bool
 	exportCSV             bool
 	exportChannelMetadata bool
@@ -33,13 +29,9 @@ func init() {
 	searchCmd := &cobra.Command{
 		Use:   "search [username]",
 		Short: "Search for a Telegram user",
-		Long: `Search for a Telegram user and display their information including:
-- Basic user details
-- Username history
-- ID history
-- Group memberships`,
-		Args: cobra.ExactArgs(1),
-		RunE: runSearch,
+		Long:  `Search for a Telegram user and display their information`,
+		Args:  cobra.ExactArgs(1),
+		RunE:  runSearch,
 	}
 
 	searchCmd.Flags().StringVar(&apiKey, "api-key", "", "TGScan API key")
@@ -208,12 +200,10 @@ func exportToJSON(resp *types.TGScanResponse, username string) error {
 }
 
 func exportToCSV(resp *types.TGScanResponse, username string) error {
-	// Export username history
 	if err := exportUsernameHistoryCSV(resp); err != nil {
 		return err
 	}
 
-	// Export groups
 	if err := exportGroupsCSV(resp, username); err != nil {
 		return err
 	}
@@ -234,7 +224,6 @@ func exportUsernameHistoryCSV(resp *types.TGScanResponse) error {
 		return err
 	}
 
-	// Always write the current username as a record
 	currentRecord := []string{
 		fmt.Sprintf("%d", resp.Result.User.ID),
 		resp.Result.User.Username,
@@ -245,7 +234,6 @@ func exportUsernameHistoryCSV(resp *types.TGScanResponse) error {
 		return err
 	}
 
-	// Write historical usernames if any exist
 	for _, h := range resp.Result.UsernameHistory {
 		record := []string{
 			fmt.Sprintf("%d", resp.Result.User.ID),
@@ -298,7 +286,6 @@ func readChannelsFromFile(filename string) ([]types.Group, error) {
 		return nil, fmt.Errorf("error reading file: %w", err)
 	}
 
-	// if the file contains any t.me links, extract those
 	channelRegex := regexp.MustCompile(`(?:https?://)?t\.me/(?:[a-z]/)?([0-9]+|[a-zA-Z0-9_]+)`)
 	if matches := channelRegex.FindAllStringSubmatch(string(content), -1); len(matches) > 0 {
 		channels := make([]types.Group, 0, len(matches))
@@ -312,7 +299,6 @@ func readChannelsFromFile(filename string) ([]types.Group, error) {
 		return channels, nil
 	}
 
-	// otherwise treat each non empty, non comment line as a channel id or username
 	var channels []types.Group
 	scanner := bufio.NewScanner(bytes.NewReader(content))
 	for scanner.Scan() {

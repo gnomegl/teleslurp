@@ -14,6 +14,7 @@ import (
 	"github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/tg"
 	"github.com/schollz/progressbar/v3"
+	"math/rand"
 )
 
 type MessageData struct {
@@ -135,13 +136,16 @@ type Client struct {
 
 func NewClient(cfg *config.Config) *Client {
 	sessionStore := &session.FileStorage{Path: config.GetSessionPath()}
-	client := telegram.NewClient(cfg.TGAPIID, cfg.TGAPIHash, telegram.Options{
+	opts := telegram.Options{
+		NoUpdates:      false,
 		SessionStorage: sessionStore,
-	})
+	}
 
+	client := telegram.NewClient(cfg.TGAPIID, cfg.TGAPIHash, opts)
 	return &Client{
 		cfg:    cfg,
 		client: client,
+		api:    client.API(),
 	}
 }
 
@@ -199,36 +203,105 @@ func (c *Client) resolveUser(ctx context.Context, searchUser *types.User) (int64
 
 		for _, u := range resolvedUser.Users {
 			if tgUser, ok := u.(*tg.User); ok && tgUser.Username == searchUser.Username {
+				searchUser.ID = tgUser.ID
+				searchUser.Username = tgUser.Username
 				return tgUser.ID, tgUser.AccessHash, nil
 			}
 		}
 		return 0, 0, fmt.Errorf("could not find user with username: %s", searchUser.Username)
 	}
 
-	// For ID-based searches, use minimal access hash
+	// For ID-based searches, we'll try to resolve username from group participants later
 	return searchUser.ID, searchUser.ID, nil
 }
 
-func (c *Client) searchChannel(ctx context.Context, channel types.Group, userID, userAccessHash int64) (*ChannelSearchResult, error) {
+func (c *Client) tryResolveUsernameFromGroups(ctx context.Context, userID int64, groups []types.Group) (string, int64) {
+	for _, group := range groups {
+		var channelID int64
+		var channelAccessHash int64
+
+		if group.Username != "" {
+			cleanUsername := strings.TrimPrefix(group.Username, "@")
+			resolvedPeer, err := c.api.ContactsResolveUsername(ctx, cleanUsername)
+			if err != nil {
+				continue
+			}
+
+			for _, chat := range resolvedPeer.Chats {
+				if ch, ok := chat.(*tg.Channel); ok {
+					channelID = ch.ID
+					channelAccessHash = ch.AccessHash
+					break
+				}
+			}
+		} else if group.ID != 0 {
+			channelID = group.ID
+			channelAccessHash = group.ID
+		}
+
+		if channelID == 0 {
+			continue
+		}
+
+		// Try to get participants to find the user
+		participants, err := c.api.ChannelsGetParticipants(ctx, &tg.ChannelsGetParticipantsRequest{
+			Channel: &tg.InputChannel{
+				ChannelID:  channelID,
+				AccessHash: channelAccessHash,
+			},
+			Filter: &tg.ChannelParticipantsSearch{
+				Q: "",
+			},
+			Offset: 0,
+			Limit:  200,
+		})
+		if err != nil {
+			continue
+		}
+
+		if channelParticipants, ok := participants.(*tg.ChannelsChannelParticipants); ok {
+			for _, user := range channelParticipants.Users {
+				if u, ok := user.(*tg.User); ok && u.ID == userID {
+					// Found the user! Return their current username and access hash
+					return u.Username, u.AccessHash
+				}
+			}
+		}
+	}
+
+	return "", 0
+}
+
+func (c *Client) searchChannel(ctx context.Context, channel types.Group, userID, userAccessHash int64, searchUser *types.User) (*ChannelSearchResult, error) {
 	var channelID int64
 	var channelAccessHash int64
 
 	if channel.Username != "" {
-		resolvedPeer, err := c.api.ContactsResolveUsername(ctx, channel.Username)
+		cleanUsername := strings.TrimPrefix(channel.Username, "@")
+
+		resolvedPeer, err := c.api.ContactsResolveUsername(ctx, cleanUsername)
 		if err != nil {
-			return nil, fmt.Errorf("could not find channel %s: %w", channel.Username, err)
+			if strings.Contains(err.Error(), "USERNAME_NOT_OCCUPIED") || strings.Contains(err.Error(), "USERNAME_INVALID") {
+				return nil, fmt.Errorf("channel %s not found (may be private or renamed)", cleanUsername)
+			}
+			return nil, fmt.Errorf("could not find channel %s: %w", cleanUsername, err)
 		}
 
 		if len(resolvedPeer.Chats) == 0 {
-			return nil, fmt.Errorf("could not find channel %s", channel.Username)
+			return nil, fmt.Errorf("could not find channel %s", cleanUsername)
 		}
 
-		ch, ok := resolvedPeer.Chats[0].(*tg.Channel)
-		if !ok {
-			return nil, fmt.Errorf("could not find channel %s", channel.Username)
+		for _, chat := range resolvedPeer.Chats {
+			if ch, ok := chat.(*tg.Channel); ok {
+				channelID = ch.ID
+				channelAccessHash = ch.AccessHash
+				break
+			}
 		}
-		channelID = ch.ID
-		channelAccessHash = ch.AccessHash
+
+		if channelID == 0 {
+			return nil, fmt.Errorf("could not find channel %s", cleanUsername)
+		}
 	} else {
 		channelID = channel.ID
 		channelAccessHash = channel.ID
@@ -265,6 +338,34 @@ func (c *Client) searchChannel(ctx context.Context, channel types.Group, userID,
 				result.Admins = admins
 			}
 			break
+		}
+	}
+
+	if searchUser != nil && searchUser.Username == "" && searchUser.ID != 0 {
+		participants, err := c.api.ChannelsGetParticipants(ctx, &tg.ChannelsGetParticipantsRequest{
+			Channel: &tg.InputChannel{
+				ChannelID:  channelID,
+				AccessHash: channelAccessHash,
+			},
+			Filter: &tg.ChannelParticipantsSearch{
+				Q: "",
+			},
+			Offset: 0,
+			Limit:  200,
+		})
+		if err == nil {
+			if channelParticipants, ok := participants.(*tg.ChannelsChannelParticipants); ok {
+				for _, user := range channelParticipants.Users {
+					if u, ok := user.(*tg.User); ok && u.ID == userID {
+						// Found the user! Update their username
+						searchUser.Username = u.Username
+						if u.AccessHash != 0 {
+							userAccessHash = u.AccessHash
+						}
+						break
+					}
+				}
+			}
 		}
 	}
 
@@ -375,7 +476,13 @@ func (c *Client) searchMessages(ctx context.Context, channelID, channelAccessHas
 					firstMessageDate = messageDate
 				}
 
-				messageURL := formatMessageURL(channelID, m.ID, msgs.Chats[0].(*tg.Channel).Username)
+				var channelUsername string
+				if len(msgs.Chats) > 0 {
+					if ch, ok := msgs.Chats[0].(*tg.Channel); ok {
+						channelUsername = ch.Username
+					}
+				}
+				messageURL := formatMessageURL(channelID, m.ID, channelUsername)
 				messages = append(messages, MessageData{
 					MessageID: m.ID,
 					Date:      messageDate.Format("2006-01-02 15:04:05"),
@@ -426,6 +533,17 @@ func (c *Client) Run(ctx context.Context, searchUser *types.User, groups []types
 			return err
 		}
 
+		if searchUser.ID != 0 && searchUser.Username == "" {
+			resolvedUsername, resolvedAccessHash := c.tryResolveUsernameFromGroups(ctx, userID, groups)
+			if resolvedUsername != "" {
+				searchUser.Username = resolvedUsername
+				if resolvedAccessHash != 0 {
+					userAccessHash = resolvedAccessHash
+				}
+				fmt.Printf("Resolved username for ID %d: @%s\n", userID, resolvedUsername)
+			}
+		}
+
 		fmt.Printf("Searching messages for user ID: %d\n", userID)
 
 		var allMessages []MessageData
@@ -454,9 +572,14 @@ func (c *Client) Run(ctx context.Context, searchUser *types.User, groups []types
 			fmt.Print("\033[1A\033[K")
 			fmt.Printf("[%d/%d] Checking %s...\n", groupIdx+1, len(groups), group.Title)
 
-			result, err := c.searchChannel(ctx, group, userID, userAccessHash)
+			result, err := c.searchChannel(ctx, group, userID, userAccessHash, searchUser)
 			if err != nil {
-				fmt.Printf("Error searching channel: %v\n", err)
+				// More detailed error message
+				if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "USERNAME") {
+					fmt.Printf("Channel %s not accessible (private/renamed/deleted)\n", group.Title)
+				} else {
+					fmt.Printf("Error searching channel: %v\n", err)
+				}
 				continue
 			}
 
@@ -467,6 +590,11 @@ func (c *Client) Run(ctx context.Context, searchUser *types.User, groups []types
 			if len(result.Messages) > 0 {
 				fmt.Print("\033[1A\033[K")
 				fmt.Printf("Found %d messages in %s\n", len(result.Messages), result.Title)
+
+				for i := range result.Messages {
+					result.Messages[i].ChannelTitle = result.Title
+					result.Messages[i].ChannelUsername = result.Username
+				}
 
 				allMessages = append(allMessages, result.Messages...)
 				allMetadata = append(allMetadata, ChannelMetadata{
@@ -523,7 +651,7 @@ func (c *Client) printSummary(metadata []ChannelMetadata, messages []MessageData
 
 		messageCount := 0
 		for _, msg := range messages {
-			if msg.ChannelUsername == meta.ChannelUsername {
+			if msg.ChannelUsername == meta.ChannelUsername || (meta.ChannelUsername == "" && msg.ChannelTitle == meta.ChannelTitle) {
 				messageCount++
 			}
 		}
@@ -581,6 +709,579 @@ func (c *Client) exportResults(messages []MessageData, metadata []ChannelMetadat
 		return fmt.Errorf("unsupported output format: %s", format)
 	}
 
+	return nil
+}
+
+func (c *Client) GetChannelMessages(ctx context.Context, channelID int64) ([]MessageData, error) {
+	if err := c.authenticate(ctx); err != nil {
+		return nil, fmt.Errorf("error authenticating: %w", err)
+	}
+
+	channel, err := c.api.ChannelsGetFullChannel(ctx, &tg.InputChannel{
+		ChannelID:  channelID,
+		AccessHash: 0,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("error getting channel: %w", err)
+	}
+
+	messages := make([]MessageData, 0)
+	channelInfo := channel.Chats[0]
+	var channelTitle string
+	if ch, ok := channelInfo.(*tg.Channel); ok {
+		channelTitle = ch.Title
+	}
+
+	history, err := c.api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
+		Peer: &tg.InputPeerChannel{
+			ChannelID:  channelID,
+			AccessHash: 0,
+		},
+		Limit: 100, // Fetch last 100 messages
+	})
+	if err != nil {
+		return nil, fmt.Errorf("error getting messages: %w", err)
+	}
+
+	msgs := history.(*tg.MessagesChannelMessages)
+	for _, msg := range msgs.Messages {
+		message, ok := msg.(*tg.Message)
+		if !ok || message.Message == "" {
+			continue
+		}
+
+		messages = append(messages, MessageData{
+			ChannelTitle: channelTitle,
+			MessageID:    message.ID,
+			Date:         time.Unix(int64(message.Date), 0).Format(time.RFC3339),
+			Message:      message.Message,
+			URL:          formatMessageURL(channelID, message.ID, msgs.Chats[0].(*tg.Channel).Username),
+		})
+	}
+
+	return messages, nil
+}
+
+func (c *Client) GetChannelsMessages(ctx context.Context, channelIDs []int64) ([]MessageData, error) {
+	var allMessages []MessageData
+	for _, channelID := range channelIDs {
+		messages, err := c.GetChannelMessages(ctx, channelID)
+		if err != nil {
+			fmt.Printf("Error getting messages for channel %d: %v\n", channelID, err)
+			continue
+		}
+		allMessages = append(allMessages, messages...)
+	}
+	return allMessages, nil
+}
+
+func (c *Client) MonitorChannels(ctx context.Context, channelIDs []int64, handler func(MessageData) error) error {
+	if err := c.authenticate(ctx); err != nil {
+		return fmt.Errorf("error authenticating: %w", err)
+	}
+
+	channels := make(map[int64]bool)
+	for _, id := range channelIDs {
+		channels[id] = true
+	}
+
+	d := tg.NewUpdateDispatcher()
+
+	// Register handler for new channel messages
+	d.OnNewChannelMessage(func(ctx context.Context, e tg.Entities, update *tg.UpdateNewChannelMessage) error {
+		fmt.Println("Received new channel message update")
+
+		msg, ok := update.Message.(*tg.Message)
+		if !ok {
+			fmt.Printf("Update message is not *tg.Message, got: %T\n", update.Message)
+			return nil
+		}
+		fmt.Printf("Message content: %s\n", msg.Message)
+
+		// Check if this is from a monitored channel
+		peer, ok := msg.PeerID.(*tg.PeerChannel)
+		if !ok {
+			fmt.Printf("Message peer is not a channel, got: %T\n", msg.PeerID)
+			return nil
+		}
+		channelID := peer.ChannelID
+		if !channels[channelID] {
+			fmt.Printf("Message from unmonitored channel: %d\n", channelID)
+			return nil
+		}
+		fmt.Printf("Message is from monitored channel: %d\n", channelID)
+
+		// Get channel info
+		fmt.Printf("Getting channel info for: %d\n", channelID)
+		channel, err := c.api.ChannelsGetFullChannel(ctx, &tg.InputChannel{
+			ChannelID:  channelID,
+			AccessHash: 0,
+		})
+		if err != nil {
+			fmt.Printf("Error getting channel info: %v\n", err)
+			return nil
+		}
+		fmt.Println("Successfully got channel info")
+
+		channelInfo := channel.Chats[0]
+		var channelTitle string
+		if ch, ok := channelInfo.(*tg.Channel); ok {
+			channelTitle = ch.Title
+			fmt.Printf("Channel title: %s\n", channelTitle)
+		}
+
+		// Check if message is from a channel that has forwarding disabled
+		isProtected := false
+		if channel, ok := channelInfo.(*tg.Channel); ok {
+			isProtected = channel.Noforwards
+			fmt.Printf("Channel forwarding protection: %v\n", isProtected)
+		}
+
+		// If the channel has forwarding disabled, we'll indicate this in the message
+		var attribution string
+		if isProtected {
+			attribution = fmt.Sprintf("\n\n[Protected Content] Originally posted in: %s", channelTitle)
+		} else {
+			attribution = fmt.Sprintf("\n\nForwarded from: %s", channelTitle)
+		}
+
+		// Prepare message text with attribution
+		messageText := fmt.Sprintf("%s%s", msg.Message, attribution)
+		fmt.Printf("Prepared message text: %s\n", messageText)
+
+		// Create target channel peer
+		targetPeer := &tg.InputPeerChannel{
+			ChannelID:  channelID,
+			AccessHash: 0,
+		}
+		fmt.Printf("Created target peer for channel: %d\n", channelID)
+
+		// Handle media
+		if msg.Media != nil {
+			fmt.Printf("Message contains media of type: %T\n", msg.Media)
+			switch m := msg.Media.(type) {
+			case *tg.MessageMediaPhoto:
+				fmt.Println("Processing photo message")
+				if isProtected {
+					fmt.Println("Photo is from protected channel, sending text-only message")
+					_, err = c.api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+						Peer:     targetPeer,
+						Message:  messageText + "\n[Photo was in original message but cannot be forwarded due to content protection]",
+						RandomID: rand.Int63(),
+					})
+					if err != nil {
+						fmt.Printf("Error sending protected photo message: %v\n", err)
+						return nil
+					}
+					fmt.Println("Successfully sent protected photo message")
+					break
+				}
+
+				fmt.Println("Starting photo download process")
+				// Download and reupload photo
+				photo := m.Photo.(*tg.Photo)
+				largest := photo.Sizes[len(photo.Sizes)-1].(*tg.PhotoSize)
+
+				// Download photo in chunks
+				var chunks [][]byte
+				offset := 0
+				for {
+					file, err := c.api.UploadGetFile(ctx, &tg.UploadGetFileRequest{
+						Location: &tg.InputPhotoFileLocation{
+							ID:            photo.ID,
+							AccessHash:    photo.AccessHash,
+							FileReference: photo.FileReference,
+							ThumbSize:     largest.Type,
+						},
+						Offset: int64(offset),
+						Limit:  524288, // 512KB chunks
+					})
+					if err != nil {
+						fmt.Printf("Error downloading photo chunk: %v\n", err)
+						return nil
+					}
+
+					data, ok := file.(*tg.UploadFile)
+					if !ok {
+						fmt.Printf("Unexpected response type for photo download\n")
+						return nil
+					}
+
+					chunks = append(chunks, data.Bytes)
+					offset += len(data.Bytes)
+
+					if len(data.Bytes) < 524288 {
+						break
+					}
+				}
+
+				fmt.Printf("Successfully downloaded photo in %d chunks\n", len(chunks))
+
+				// Upload photo chunks
+				fileID := rand.Int63()
+				for i, chunk := range chunks {
+					uploaded, err := c.api.UploadSaveFilePart(ctx, &tg.UploadSaveFilePartRequest{
+						FileID:   fileID,
+						FilePart: i,
+						Bytes:    chunk,
+					})
+					if err != nil || !uploaded {
+						fmt.Printf("Error uploading photo chunk: %v\n", err)
+						return nil
+					}
+				}
+
+				fmt.Printf("Successfully uploaded photo in %d chunks\n", len(chunks))
+
+				// Send message with photo
+				fmt.Println("Sending photo message to target channel")
+				_, err = c.api.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
+					Peer: targetPeer,
+					Media: &tg.InputMediaUploadedPhoto{
+						File: &tg.InputFile{
+							ID:          fileID,
+							Parts:       len(chunks),
+							Name:        fmt.Sprintf("photo_%d.jpg", photo.ID),
+							MD5Checksum: "",
+						},
+					},
+					Message:  messageText,
+					RandomID: rand.Int63(),
+				})
+				if err != nil {
+					fmt.Printf("Error sending photo message: %v\n", err)
+					return nil
+				}
+				fmt.Println("Successfully sent photo message")
+
+			case *tg.MessageMediaDocument:
+				fmt.Println("Processing document message")
+				// Similar logging for document handling...
+				// ...
+			default:
+				fmt.Printf("Unhandled media type: %T, sending as text-only\n", m)
+				// For text-only messages
+				_, err = c.api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+					Peer:     targetPeer,
+					Message:  messageText,
+					RandomID: rand.Int63(),
+				})
+				if err != nil {
+					fmt.Printf("Error sending text message: %v\n", err)
+					return nil
+				}
+				fmt.Println("Successfully sent text-only message")
+			}
+		} else {
+			fmt.Println("Message contains no media, sending as text-only")
+			// For text-only messages
+			_, err = c.api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+				Peer:     targetPeer,
+				Message:  messageText,
+				RandomID: rand.Int63(),
+			})
+			if err != nil {
+				fmt.Printf("Error sending text message: %v\n", err)
+				return nil
+			}
+			fmt.Println("Successfully sent text-only message")
+		}
+
+		fmt.Printf("Successfully forwarded message from %s to target channel\n", channelTitle)
+		return nil
+	})
+
+	fmt.Println("Registered message handler")
+
+	// Now authenticate
+	if err := c.authenticate(ctx); err != nil {
+		return fmt.Errorf("error authenticating: %w", err)
+	}
+	fmt.Println("Successfully authenticated")
+
+	// Start receiving updates
+	fmt.Println("Starting update loop...")
+
+	// Get initial channel states
+	fmt.Println("Getting initial channel states...")
+	for channelID := range channels {
+		fmt.Printf("Getting initial state for channel %d\n", channelID)
+		_, err := c.api.UpdatesGetChannelDifference(ctx, &tg.UpdatesGetChannelDifferenceRequest{
+			Channel: &tg.InputChannel{
+				ChannelID:  channelID,
+				AccessHash: 0,
+			},
+			Filter: &tg.ChannelMessagesFilterEmpty{},
+			Pts:    0,
+			Limit:  100,
+		})
+		if err != nil {
+			fmt.Printf("Error getting channel difference for %d: %v\n", channelID, err)
+		} else {
+			fmt.Printf("Successfully got initial state for channel %d\n", channelID)
+		}
+	}
+
+	// Run the client to start receiving updates
+	return c.client.Run(ctx, func(ctx context.Context) error {
+		fmt.Printf("Client running, monitoring %d channels...\n", len(channels))
+		<-ctx.Done()
+		fmt.Println("Update loop terminated")
+		return nil
+	})
+}
+
+func (c *Client) MonitorAndForward(ctx context.Context, sourceChannelIDs []int64, targetChannelID int64) error {
+	fmt.Printf("Starting MonitorAndForward with source channels: %v, target: %d\n", sourceChannelIDs, targetChannelID)
+
+	// Create a map of channel IDs for quick lookup
+	channels := make(map[int64]bool)
+	for _, id := range sourceChannelIDs {
+		channels[id] = true
+	}
+
+	// Create a dispatcher and register handlers
+	dispatcher := tg.NewUpdateDispatcher()
+	fmt.Println("Created update dispatcher")
+
+	// Register handler for new channel messages
+	dispatcher.OnNewChannelMessage(func(ctx context.Context, e tg.Entities, update *tg.UpdateNewChannelMessage) error {
+		fmt.Println("Received new channel message update")
+
+		msg, ok := update.Message.(*tg.Message)
+		if !ok {
+			fmt.Printf("Update message is not *tg.Message, got: %T\n", update.Message)
+			return nil
+		}
+		fmt.Printf("Message content: %s\n", msg.Message)
+
+		// Check if this is from a monitored channel
+		peer, ok := msg.PeerID.(*tg.PeerChannel)
+		if !ok {
+			fmt.Printf("Message peer is not a channel, got: %T\n", msg.PeerID)
+			return nil
+		}
+		channelID := peer.ChannelID
+		if !channels[channelID] {
+			fmt.Printf("Message from unmonitored channel: %d\n", channelID)
+			return nil
+		}
+		fmt.Printf("Message is from monitored channel: %d\n", channelID)
+
+		// Get channel info
+		fmt.Printf("Getting channel info for: %d\n", channelID)
+		channel, err := c.api.ChannelsGetFullChannel(ctx, &tg.InputChannel{
+			ChannelID:  channelID,
+			AccessHash: 0,
+		})
+		if err != nil {
+			fmt.Printf("Error getting channel info: %v\n", err)
+			return nil
+		}
+		fmt.Println("Successfully got channel info")
+
+		channelInfo := channel.Chats[0]
+		var channelTitle string
+		if ch, ok := channelInfo.(*tg.Channel); ok {
+			channelTitle = ch.Title
+			fmt.Printf("Channel title: %s\n", channelTitle)
+		}
+
+		// Check if message is from a channel that has forwarding disabled
+		isProtected := false
+		if channel, ok := channelInfo.(*tg.Channel); ok {
+			isProtected = channel.Noforwards
+			fmt.Printf("Channel forwarding protection: %v\n", isProtected)
+		}
+
+		// If the channel has forwarding disabled, we'll indicate this in the message
+		var attribution string
+		if isProtected {
+			attribution = fmt.Sprintf("\n\n[Protected Content] Originally posted in: %s", channelTitle)
+		} else {
+			attribution = fmt.Sprintf("\n\nForwarded from: %s", channelTitle)
+		}
+
+		// Prepare message text with attribution
+		messageText := fmt.Sprintf("%s%s", msg.Message, attribution)
+		fmt.Printf("Prepared message text: %s\n", messageText)
+
+		// Create target channel peer
+		targetPeer := &tg.InputPeerChannel{
+			ChannelID:  targetChannelID,
+			AccessHash: 0,
+		}
+		fmt.Printf("Created target peer for channel: %d\n", targetChannelID)
+
+		// Handle media
+		if msg.Media != nil {
+			fmt.Printf("Message contains media of type: %T\n", msg.Media)
+			switch m := msg.Media.(type) {
+			case *tg.MessageMediaPhoto:
+				fmt.Println("Processing photo message")
+				if isProtected {
+					fmt.Println("Photo is from protected channel, sending text-only message")
+					_, err = c.api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+						Peer:     targetPeer,
+						Message:  messageText + "\n[Photo was in original message but cannot be forwarded due to content protection]",
+						RandomID: rand.Int63(),
+					})
+					if err != nil {
+						fmt.Printf("Error sending protected photo message: %v\n", err)
+						return nil
+					}
+					fmt.Println("Successfully sent protected photo message")
+					break
+				}
+
+				fmt.Println("Starting photo download process")
+				// Download and reupload photo
+				photo := m.Photo.(*tg.Photo)
+				largest := photo.Sizes[len(photo.Sizes)-1].(*tg.PhotoSize)
+
+				// Download photo in chunks
+				var chunks [][]byte
+				offset := 0
+				for {
+					file, err := c.api.UploadGetFile(ctx, &tg.UploadGetFileRequest{
+						Location: &tg.InputPhotoFileLocation{
+							ID:            photo.ID,
+							AccessHash:    photo.AccessHash,
+							FileReference: photo.FileReference,
+							ThumbSize:     largest.Type,
+						},
+						Offset: int64(offset),
+						Limit:  524288, // 512KB chunks
+					})
+					if err != nil {
+						fmt.Printf("Error downloading photo chunk: %v\n", err)
+						return nil
+					}
+
+					data, ok := file.(*tg.UploadFile)
+					if !ok {
+						fmt.Printf("Unexpected response type for photo download\n")
+						return nil
+					}
+
+					chunks = append(chunks, data.Bytes)
+					offset += len(data.Bytes)
+
+					if len(data.Bytes) < 524288 {
+						break
+					}
+				}
+
+				fmt.Printf("Successfully downloaded photo in %d chunks\n", len(chunks))
+
+				// Upload photo chunks
+				fileID := rand.Int63()
+				for i, chunk := range chunks {
+					uploaded, err := c.api.UploadSaveFilePart(ctx, &tg.UploadSaveFilePartRequest{
+						FileID:   fileID,
+						FilePart: i,
+						Bytes:    chunk,
+					})
+					if err != nil || !uploaded {
+						fmt.Printf("Error uploading photo chunk: %v\n", err)
+						return nil
+					}
+				}
+
+				fmt.Printf("Successfully uploaded photo in %d chunks\n", len(chunks))
+
+				// Send message with photo
+				fmt.Println("Sending photo message to target channel")
+				_, err = c.api.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
+					Peer: targetPeer,
+					Media: &tg.InputMediaUploadedPhoto{
+						File: &tg.InputFile{
+							ID:          fileID,
+							Parts:       len(chunks),
+							Name:        fmt.Sprintf("photo_%d.jpg", photo.ID),
+							MD5Checksum: "",
+						},
+					},
+					Message:  messageText,
+					RandomID: rand.Int63(),
+				})
+				if err != nil {
+					fmt.Printf("Error sending photo message: %v\n", err)
+					return nil
+				}
+				fmt.Println("Successfully sent photo message")
+
+			case *tg.MessageMediaDocument:
+				fmt.Println("Processing document message")
+				// Similar logging for document handling...
+				// ...
+			default:
+				fmt.Printf("Unhandled media type: %T, sending as text-only\n", m)
+				// For text-only messages
+				_, err = c.api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+					Peer:     targetPeer,
+					Message:  messageText,
+					RandomID: rand.Int63(),
+				})
+				if err != nil {
+					fmt.Printf("Error sending text message: %v\n", err)
+					return nil
+				}
+				fmt.Println("Successfully sent text-only message")
+			}
+		} else {
+			fmt.Println("Message contains no media, sending as text-only")
+			// For text-only messages
+			_, err = c.api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+				Peer:     targetPeer,
+				Message:  messageText,
+				RandomID: rand.Int63(),
+			})
+			if err != nil {
+				fmt.Printf("Error sending text message: %v\n", err)
+				return nil
+			}
+			fmt.Println("Successfully sent text-only message")
+		}
+
+		fmt.Printf("Successfully forwarded message from %s to target channel\n", channelTitle)
+		return nil
+	})
+
+	fmt.Println("Registered message handler")
+
+	// Now authenticate
+	if err := c.authenticate(ctx); err != nil {
+		return fmt.Errorf("error authenticating: %w", err)
+	}
+	fmt.Println("Successfully authenticated")
+
+	// Start receiving updates
+	fmt.Println("Starting update loop...")
+
+	// Get initial channel states
+	fmt.Println("Getting initial channel states...")
+	for channelID := range channels {
+		fmt.Printf("Getting initial state for channel %d\n", channelID)
+		_, err := c.api.UpdatesGetChannelDifference(ctx, &tg.UpdatesGetChannelDifferenceRequest{
+			Channel: &tg.InputChannel{
+				ChannelID:  channelID,
+				AccessHash: 0,
+			},
+			Filter: &tg.ChannelMessagesFilterEmpty{},
+			Pts:    0,
+			Limit:  100,
+		})
+		if err != nil {
+			fmt.Printf("Error getting channel difference for %d: %v\n", channelID, err)
+		} else {
+			fmt.Printf("Successfully got initial state for channel %d\n", channelID)
+		}
+	}
+
+	fmt.Println("Entering main loop...")
+	<-ctx.Done()
+	fmt.Println("Update loop terminated")
 	return nil
 }
 

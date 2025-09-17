@@ -27,3 +27,5 @@ go.work.sum
 credentials.json
 tg-session.json
 tg
+
+teleslurp.db
